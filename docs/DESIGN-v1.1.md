@@ -659,7 +659,7 @@ sealed = crypto.seal(dek, json.dumps(inner, ensure_ascii=False).encode("utf-8"),
   "token": "8Kq2..._z1",
   "started": "2026-01-05T04:30:02+00:00",
   "version_app": "1.1.0",
-  "vault_path": "G:\\deepseek\\pwdvault\\demo\\data.enc"
+  "vault_path": "<库目录>\\data.enc"
 }
 ```
 - 写入用 `vault.atomic_write` + `os.chmod(0o600)`（Windows 上 chmod 只影响只读位，实际保护靠用户目录 ACL —— **必须在 README 里写明这一点**，不要假装 0600 在 Windows 上有效）。

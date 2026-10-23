@@ -1,13 +1,13 @@
 @echo off
-rem pv å‘½ä»¤åŒ…è£…å™¨ï¼šæŠŠ pv.py æŒ‚æˆä¸€ä¸ªå¯ä»¥ç›´æŽ¥æ•²çš„å‘½ä»¤ã€‚
+rem pv ÃüÁî°ü×°Æ÷£º°Ñ pv.py ¹Ò³ÉÒ»¸ö¿ÉÒÔÖ±½ÓÇÃµÄÃüÁî¡£
 rem
-rem æŒ‰ä½ çš„çŽ¯å¢ƒäºŒé€‰ä¸€ï¼ˆé»˜è®¤èµ° py å¯åŠ¨å™¨ï¼Œè£…äº†å®˜æ–¹ Python å°±æœ‰ï¼‰ï¼š
-rem   py -3     â€”â€” Windows çš„ Python Launcherï¼Œä¼šè‡ªåŠ¨æŒ‘å·²è£…çš„ Python 3
-rem   python    â€”â€” PATH é‡Œæœ‰ python æ—¶ç”¨è¿™ä¸ª
-rem ä¸¤è€…éƒ½ä¸è¡Œï¼Ÿå°±æŠŠä¸‹é¢é‚£è¡Œæ¢æˆä½ æœºå™¨ä¸Š python.exe çš„ç»å¯¹è·¯å¾„ï¼Œä¾‹å¦‚ï¼š
-rem   "C:\Users\ä½ \AppData\Local\Programs\Python\Python311\python.exe" "%~dp0pv.py" %*
+rem °´ÄãµÄ»·¾³¶þÑ¡Ò»£¨Ä¬ÈÏ×ß py Æô¶¯Æ÷£¬×°ÁË¹Ù·½ Python ¾ÍÓÐ£©£º
+rem   py -3     ¡ª¡ª Windows µÄ Python Launcher£¬»á×Ô¶¯ÌôÒÑ×°µÄ Python 3
+rem   python    ¡ª¡ª PATH ÀïÓÐ python Ê±ÓÃÕâ¸ö
+rem Á½Õß¶¼²»ÐÐ£¿¾Í°ÑÏÂÃæÄÇÐÐ»»³ÉÄã»úÆ÷ÉÏ python.exe µÄ¾ø¶ÔÂ·¾¶£¬ÀýÈç£º
+rem   "C:\Users\Äã\AppData\Local\Programs\Python\Python311\python.exe" "%~dp0pv.py" %*
 rem
-rem ç”¨å“ªä¸ªè§£é‡Šå™¨ä¸é‡è¦ï¼Œä½†**å¿…é¡»æ˜¯ Python 3.9 åŠä»¥ä¸Š**ã€‚
+rem ÓÃÄÄ¸ö½âÊÍÆ÷²»ÖØÒª£¬µ«**±ØÐëÊÇ Python 3.9 ¼°ÒÔÉÏ**¡£
 setlocal
 set "PYTHONIOENCODING=utf-8"
 
@@ -21,5 +21,5 @@ where python >nul 2>nul && (
     exit /b %ERRORLEVEL%
 )
 
-echo [pv] æ²¡æ‰¾åˆ° Pythonã€‚è¯·å…ˆå®‰è£… Python 3.9+ï¼Œæˆ–ç¼–è¾‘ pv.bat æŠŠ python.exe çš„ç»å¯¹è·¯å¾„å¡«è¿›åŽ»ã€‚ >&2
+echo [pv] Ã»ÕÒµ½ Python¡£ÇëÏÈ°²×° Python 3.9+£¬»ò±à¼­ pv.bat °Ñ python.exe µÄ¾ø¶ÔÂ·¾¶Ìî½øÈ¥¡£ >&2
 exit /b 1

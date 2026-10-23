@@ -370,6 +370,112 @@ a { color: var(--pv-accent); }
 }
 .pv-unlock-foot { margin-top: var(--pv-sp-4); color: var(--pv-text-dim); }
 
+/* ========================================================== ①b 建库向导 / 恢复码
+   与解锁页同一套观感：居中卡片 + 同样的阴影半径 + 同样的间距阶层。
+   ========================================================================== */
+.pv-setup {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--pv-sp-5);
+  background: var(--pv-bg);
+  overflow: auto;
+}
+.pv-setup-card {
+  width: min(420px, 100%);
+  padding: var(--pv-sp-5);
+  background: var(--pv-bg-raised);
+  border: 1px solid var(--pv-border);
+  border-radius: var(--pv-r-lg);
+  box-shadow: var(--pv-shadow-md);
+}
+/* 恢复码那一屏内容更满，给宽一点 */
+#pv-recovery-view .pv-setup-card { width: min(520px, 100%); }
+
+#pv-setup-form .pv-check { margin-bottom: var(--pv-sp-4); }
+#pv-setup-submit { margin-top: var(--pv-sp-1); }
+
+/* 「启用本机免密」这种整行可点的勾选 */
+.pv-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pv-sp-2);
+  padding: var(--pv-sp-2) var(--pv-sp-3);
+  border: 1px solid var(--pv-border);
+  border-radius: var(--pv-r-sm);
+  background: var(--pv-bg-sunken);
+  color: var(--pv-text);
+  font-size: var(--pv-fs-sm);
+  cursor: pointer;
+  user-select: none;
+}
+.pv-check input { margin: 2px 0 0; flex: 0 0 auto; accent-color: var(--pv-accent); }
+.pv-check:hover { border-color: var(--pv-border-strong); }
+
+/* 弱密码反馈：只有后端给了 entropy / level 才出现，故默认 hidden 由 JS 控制 */
+.pv-strength {
+  margin-top: var(--pv-sp-2);
+  padding: var(--pv-sp-2) var(--pv-sp-3);
+  border: 1px solid var(--pv-warn);
+  border-left-width: 3px;
+  border-radius: var(--pv-r-sm);
+  background: var(--pv-warn-weak);
+  color: var(--pv-warn);
+  font-size: var(--pv-fs-sm);
+}
+.pv-strength-line { margin: 0; font-weight: 600; }
+.pv-strength .pv-hint { color: var(--pv-warn); }
+
+/* ---- 恢复码：大到抄不错、等宽到不会把 0 看成 O */
+.pv-recovery-box {
+  display: flex;
+  align-items: center;
+  gap: var(--pv-sp-2);
+  margin: var(--pv-sp-3) 0;
+  padding: var(--pv-sp-3);
+  border: 1px dashed var(--pv-accent);
+  border-radius: var(--pv-r-md);
+  background: var(--pv-accent-weak);
+}
+.pv-recovery-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--pv-fs-xl);
+  font-weight: 600;
+  letter-spacing: .06em;
+  line-height: 1.4;
+  color: var(--pv-text);
+  word-break: break-all;
+  user-select: all;
+}
+.pv-recovery-box .pv-btn { flex: 0 0 auto; }
+
+.pv-warn-list { display: grid; gap: var(--pv-sp-1); }
+.pv-warn-item {
+  padding: 5px var(--pv-sp-3);
+  border-left: 3px solid var(--pv-border-strong);
+  border-radius: var(--pv-r-sm);
+  background: var(--pv-bg-sunken);
+  color: var(--pv-text-dim);
+  font-size: var(--pv-fs-sm);
+}
+.pv-warn-item[data-strong="true"] {
+  border-left-color: var(--pv-danger);
+  background: var(--pv-danger-weak);
+  color: var(--pv-danger);
+  font-weight: 600;
+}
+
+/* 设置页里「值 + 行内按钮」的 kv 行（本机免密开关） */
+.pv-kv-action {
+  display: flex;
+  align-items: center;
+  gap: var(--pv-sp-2);
+  flex-wrap: wrap;
+}
+.pv-kv-action > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-kv-action > .pv-btn { margin-left: auto; flex: 0 0 auto; }
+
 .pv-details {
   margin-top: var(--pv-sp-3);
   border-top: 1px solid var(--pv-border);

@@ -248,6 +248,10 @@
     pollTimer: 0,
     sideCollapsed: false,
     toastSeq: 0,
+    // ---- 建库向导 / 恢复码面板（T13）
+    mode: "unlock",         // unlock | setup | recovery | app（由 setMode 统一切换）
+    setup: { force: false, busy: false },
+    recovery: null,         // 恢复码面板挂起中：{code, note, onEnter}；非空即「还没确认抄下」
   };
 
   /* ============================================================== 3. API 层 */
@@ -348,6 +352,9 @@
       staging_busy: "另一个窗口正在整理这批文件，先让那边弄完。",
       staging_not_found: "这批整理结果已经不在了。",
       invalid_record: exc.message,
+      bad_current_password: "当前主密码不对。",
+      dpapi_unavailable: "本机免密只在 Windows 上可用。",
+      need_confirm: exc.message,
       weak_password: exc.message,
       import_failed: exc.message,
       network: exc.message,
@@ -446,6 +453,7 @@
           },
         },
       });
+      if (action.id) btn.id = action.id;   // 让调用方能改按钮文案（如「仍要使用」）
       foot.appendChild(btn);
       if (action.autofocus) autofocusNode = btn;
     });
@@ -565,11 +573,16 @@
     const methods = toArray(session.methods);
     toggleHidden("pv-dpapi", methods.indexOf("dpapi") < 0);
 
+    let hasVault = true;
+    if (session.vault_exists === false) hasVault = false;
+    else if (session.vault_exists === undefined && session.existing === false) hasVault = false;
+
     const errorBox = $("pv-unlock-error");
-    if (session.vault_exists === false) {
+    if (!hasVault) {
+      // 没有库 → 建库向导接管，解锁页上的错误条留着没意义（用户也没得解）
       if (errorBox) {
-        errorBox.hidden = false;
-        errorBox.textContent = "这个位置还没有密码库。先确认启动时用的是哪个目录（PV_VAULT 环境变量或 --vault 参数）。";
+        errorBox.hidden = true;
+        errorBox.textContent = "";
       }
     } else if (errorBox && !errorBox.dataset.sticky) {
       errorBox.hidden = true;
@@ -593,22 +606,29 @@
     box.textContent = "";
   }
 
+  /* 四个顶层视图互斥：解锁 / 建库向导 / 恢复码展示 / 主界面（DESIGN §11.2）。
+     mode 记进 state：轮询与 SSE 都可能在后台重画的同时改锁状态。 */
   function setMode(mode) {
     const unlocked = mode === "app";
-    toggleHidden("pv-unlock", unlocked);
+    state.mode = mode;
+    toggleHidden("pv-unlock", mode !== "unlock");
+    toggleHidden("pv-setup", mode !== "setup");
+    toggleHidden("pv-recovery-view", mode !== "recovery");
     toggleHidden("pv-main", !unlocked);
-    if (!unlocked) {
-      const input = $("pv-password");
-      if (input) {
-        window.setTimeout(() => {
-          try {
-            input.focus();
-            input.select();
-          } catch (exc) {
-            /* 忽略：某些环境不允许抢焦点 */
-          }
-        }, 30);
-      }
+    if (unlocked) return;
+
+    // 不在主界面时，把焦点交给当前视图的第一个可输入控件（延后 30ms 再抢，避开首屏布局）
+    const focusId = mode === "setup" ? "pv-setup-password" : mode === "recovery" ? "pv-recovery-ack" : "pv-password";
+    const input = $(focusId);
+    if (input) {
+      window.setTimeout(() => {
+        try {
+          input.focus();
+          if (typeof input.select === "function" && input.type !== "checkbox") input.select();
+        } catch (exc) {
+          /* 忽略：某些环境不允许抢焦点 */
+        }
+      }, 30);
     }
   }
 
@@ -633,13 +653,20 @@
       state.detail = null;
       state.selectedId = null;
       state.staging.items = [];
-      setMode("unlock");
+      if (!state.recovery) {
+        if (state.session.vault_exists === false) renderSetupMeta();
+        setMode(state.session.vault_exists === false ? "setup" : "unlock");
+      }
       if (wasUnlocked) {
         toast("密码库已自动锁定，重新解锁就能继续。", "warn");
         resetReveal();
       }
       return Promise.resolve();
     }
+
+    // 恢复码面板没确认之前，轮询 / SSE 刷到「已解锁」也不能跳过它 ——
+    // 用户还没抄下码就进了主界面，等于把唯一一次展示机会浪费掉。
+    if (state.recovery) return Promise.resolve();
 
     setMode("app");
     if (!wasUnlocked || opts.force) {
@@ -722,6 +749,220 @@
       if (button) button.disabled = false;
       progressDone();
     }
+  }
+
+  /* ================================================= 6b. 建库向导 + 恢复码面板
+   *
+   * 契约（后端 T12，冻结）：
+   *   POST /api/setup               {password, confirm, local_unlock, label, force}
+   *        → {ok, recovery_code, local_unlock, vault, session}
+   *        错误：already_exists(409) / missing_password(400) / password_mismatch(400)
+   *              / weak_password(422, 带 entropy + level)
+   *
+   * 强度判定一律听后端的（pwdvault 的算法只有一份，在服务端）：前端**不估 entropy**，
+   * 只在 422 回来时把后端给的 entropy / level 摆在用户面前，并把主按钮换成
+   * 「我确定，仍要使用」，再点一次补 force:true。
+   * ========================================================================== */
+
+  function showSetupError(message, hint) {
+    const box = $("pv-setup-error");
+    if (!box) return;
+    box.hidden = false;
+    box.textContent = hint ? String(message) + "\n" + String(hint) : String(message);
+  }
+
+  function clearSetupError() {
+    const box = $("pv-setup-error");
+    if (!box) return;
+    box.hidden = true;
+    box.textContent = "";
+  }
+
+  /** 把「忽略弱密码」状态复位 —— 换了密码就得重新确认一次。 */
+  function resetSetupStrength() {
+    state.setup.force = false;
+    toggleHidden("pv-setup-strength", true);
+    const submit = $("pv-setup-submit");
+    if (submit) submit.textContent = "创建密码库";
+  }
+
+  function renderSetupMeta() {
+    const session = state.session || {};
+    const parts = [];
+    const dir = vaultDirGuess();
+    if (dir) parts.push("建到：" + dir);
+    else if (session.label) parts.push("库名：" + String(session.label));
+    setText("pv-setup-vault", parts.length ? parts.join(" · ") : "这个位置还没有密码库。");
+  }
+
+  /** 422 的展示：全是后端给的数字，这里不做任何换算。 */
+  function showSetupStrength(exc) {
+    const data = exc && exc.data ? exc.data : {};
+    const entropy = data.entropy;
+    const level = data.level ? String(data.level) : "";
+    const bits = typeof entropy === "number" && isFinite(entropy) ? entropy.toFixed(1) : String(entropy === undefined ? "未知" : entropy);
+    const line = "强度不足：熵值约 " + bits + " 比特" + (level ? "（" + level + "）" : "") + "。";
+    setText("pv-setup-strength-line", line);
+    toggleHidden("pv-setup-strength", false);
+    const submit = $("pv-setup-submit");
+    if (submit) submit.textContent = "我确定，仍要使用";
+    state.setup.force = true;
+    if (submit) submit.focus();
+  }
+
+  function toggleSetupPassword() {
+    const input = $("pv-setup-password");
+    const button = $("pv-setup-toggle");
+    if (!input || !button) return;
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    button.textContent = showing ? "显示" : "隐藏";
+    button.setAttribute("aria-label", showing ? "显示主密码" : "隐藏主密码");
+  }
+
+  async function submitSetup() {
+    if (state.setup.busy) return;
+    clearSetupError();
+    const password = $("pv-setup-password");
+    const confirm = $("pv-setup-confirm");
+    const label = $("pv-setup-label");
+    const local = $("pv-setup-local");
+    const button = $("pv-setup-submit");
+    const value = password ? password.value : "";
+    const value2 = confirm ? confirm.value : "";
+
+    if (!value) {
+      showSetupError("先设一个主密码。");
+      if (password) password.focus();
+      return;
+    }
+    if (value !== value2) {
+      showSetupError("两次输入的主密码不一样。");
+      if (confirm) {
+        confirm.value = "";
+        confirm.focus();
+      }
+      return;
+    }
+
+    const payload = {
+      password: value,
+      confirm: value2,
+      local_unlock: local ? !!local.checked : false,
+      label: label ? label.value.trim() : "",
+      force: !!state.setup.force,
+    };
+
+    state.setup.busy = true;
+    if (button) button.disabled = true;
+    progressStart();
+    try {
+      const data = await apiRequest("POST", "/api/setup", payload);
+      // 成功也不见面：先把恢复码摆出来，用户确认抄下后才放行进主界面
+      await showRecoveryPanel({
+        code: data && data.recovery_code ? String(data.recovery_code) : "",
+        note: (data && data.vault ? "库文件：" + String(data.vault) + "。" : "")
+          + (data && data.local_unlock ? "本机免密已开启，下次在这台电脑上不用输主密码。" : ""),
+        session: data && data.session ? data.session : null,
+      });
+    } catch (exc) {
+      if (exc instanceof ApiError && exc.code === "weak_password") {
+        showSetupStrength(exc);
+        showSetupError(describeError(exc), "点「我确定，仍要使用」就按这个密码建库。");
+        return;
+      }
+      if (exc instanceof ApiError && exc.code === "already_exists") {
+        // 库已经存在了（多半是另一个窗口刚建的）→ 退回解锁页让用户直接解锁
+        state.recovery = null;
+        setMode("unlock");
+        showUnlockError(describeError(exc), exc.hint || "直接输主密码解锁就行。");
+        return;
+      }
+      showSetupError(describeError(exc), exc instanceof ApiError ? exc.hint : "");
+    } finally {
+      state.setup.busy = false;
+      if (button) button.disabled = false;
+      progressDone();
+    }
+  }
+
+  /* ---- 恢复码面板：建库（POST /api/setup）与重置恢复码（POST /api/vault/recovery）
+   *      共用这一份，避免写出两套「只显示一次」的界面。 */
+  function showRecoveryPanel(options) {
+    const opts = options || {};
+    const ack = $("pv-recovery-ack");
+    const enter = $("pv-recovery-enter");
+    state.recovery = {
+      code: String(opts.code || ""),
+      onEnter: opts.onEnter || null,
+      session: opts.session || null,
+    };
+    setText("pv-recovery-code", state.recovery.code || "（服务端没返回恢复码）");
+    setText("pv-recovery-note", opts.note ? String(opts.note) : "");
+    toggleHidden("pv-recovery-note", !opts.note);
+    if (ack) ack.checked = false;
+    if (enter) enter.disabled = true;
+    setMode("recovery");
+    const copy = $("pv-recovery-copy");
+    if (copy && !state.recovery.code) copy.disabled = true;
+    else if (copy) copy.disabled = false;
+    return Promise.resolve();
+  }
+
+  async function copyRecoveryCode() {
+    const code = state.recovery ? state.recovery.code : "";
+    if (!code) {
+      toast("这里没有可复制的恢复码。", "warn");
+      return;
+    }
+    const ok = await copyText(code);
+    if (ok) toast("恢复码已复制，但还是建议你再手抄一份。");
+    else toast("浏览器不让写剪贴板，手动全选上面那段抄下来。", "warn", code);
+  }
+
+  function updateRecoveryGate() {
+    const ack = $("pv-recovery-ack");
+    const enter = $("pv-recovery-enter");
+    if (enter) enter.disabled = !(ack && ack.checked);
+  }
+
+  async function enterRecovery() {
+    const gate = state.recovery;
+    if (!gate) return;
+    const ack = $("pv-recovery-ack");
+    if (!ack || !ack.checked) return;   // 没勾就进不去，按钮本来就 disabled
+    const onEnter = gate.onEnter;
+    const session = gate.session;
+    state.recovery = null;              // 放行：交给正常的会话流程
+    if (typeof onEnter === "function") {
+      try {
+        await onEnter();
+      } catch (exc) {
+        reportError(exc);
+      }
+      return;
+    }
+    if (session) {
+      resetSetupStrength();
+      clearSetupFields();
+      await applySession(session, { force: true });
+      return;
+    }
+    await refreshSession({ force: true }).catch(() => {
+      /* 上面 applySession 内部会处理；这里只兜个底 */
+    });
+  }
+
+  function clearSetupFields() {
+    const password = $("pv-setup-password");
+    const confirm = $("pv-setup-confirm");
+    if (password) password.value = "";
+    if (confirm) confirm.value = "";
+    const toggle = $("pv-setup-toggle");
+    if (password) password.type = "password";
+    if (toggle) toggle.textContent = "显示";
+    clearSetupError();
+    resetSetupStrength();
   }
 
   /* ============================================================ 7. 左栏渲染 */
@@ -3099,10 +3340,11 @@
     const security = $("pv-settings-security");
     clearNode(security);
     const methods = toArray(session.methods);
+    const localEnabled = methods.indexOf("dpapi") >= 0;
     const autoLock = num(session.auto_lock_seconds, -1);
     [
       kvRow("自动锁定", fmtMinutes(autoLock)),
-      kvRow("本机免密", methods.indexOf("dpapi") >= 0 ? "已启用（这台电脑上不用输主密码）" : "未启用"),
+      buildLocalUnlockRow(localEnabled),
       kvRow("解锁方式", methods.length ? methods.join(" / ") : "未知"),
       kvRow("剪贴板清空", state.lastCopy && state.lastCopy.auto_clear === true
         ? "上次复制：" + num(state.lastCopy.auto_clear_in, 0) + " 秒后清空（" + String(state.lastCopy.auto_clear_mode || "服务端默认") + "）"
@@ -3113,12 +3355,13 @@
 
     const writeHint = $("pv-settings-write-hint");
     if (writeHint) {
-      writeHint.textContent = "网页里改主密码 / 重置恢复码的接口还没上线（此功能暂未就绪）。现在请用 pv passwd 与 pv recovery --reset。";
+      writeHint.textContent = "改主密码和重置恢复码都会重写库头部的加密参数。"
+        + "拍板之前，先去「维护」那一节确认快照目录里有一份能用的旧文件。";
     }
     const changeBtn = $("pv-settings-change-password");
-    if (changeBtn) changeBtn.disabled = true;
+    if (changeBtn) changeBtn.disabled = false;
     const resetBtn = $("pv-settings-reset-recovery");
-    if (resetBtn) resetBtn.disabled = true;
+    if (resetBtn) resetBtn.disabled = false;
 
     const inbox = $("pv-settings-inbox");
     clearNode(inbox);
@@ -3148,11 +3391,292 @@
     const danger = $("pv-settings-danger");
     clearNode(danger);
     [
-      kvRow("改主密码", "会重写头部密钥封装，需要当前主密码。命令行：pv passwd"),
-      kvRow("重置恢复码", "旧恢复码立刻失效。命令行：pv recovery --reset"),
+      kvRow("改主密码", "会重写头部密钥封装，需要当前主密码。在这页上面点「改主密码」。"),
+      kvRow("重置恢复码", "旧恢复码立刻失效。在这页上面点「重新生成恢复码」，新码只在界面上出现一次。"),
+      kvRow("导出明文", "把所有记录写成明文文件，等于把保护全部撤掉 —— 用完请立刻删除。"),
     ].forEach((pair) => {
       pair.forEach((node) => danger.appendChild(node));
     });
+  }
+
+  /* ---- 本机免密（POST /api/vault/local-unlock） ---------------------------- */
+  function buildLocalUnlockRow(enabled) {
+    const button = el("button", {
+      cls: "pv-btn pv-btn-sm",
+      attrs: { id: "pv-settings-local-unlock", type: "button" },
+      text: enabled ? "关闭" : "启用",
+    });
+    button.addEventListener("click", () => toggleLocalUnlock(!enabled));
+    return [
+      el("dt", { text: "本机免密" }),
+      el("dd", { cls: "pv-kv-action" }, [
+        el("span", { text: enabled ? "已启用（这台电脑上不用输主密码）" : "未启用" }),
+        button,
+      ]),
+    ];
+  }
+
+  async function toggleLocalUnlock(next) {
+    const button = $("pv-settings-local-unlock");
+    if (button) button.disabled = true;
+    progressStart();
+    try {
+      const data = await apiRequest("POST", "/api/vault/local-unlock", { enabled: !!next });
+      const enabled = data && data.enabled !== undefined ? !!data.enabled : !!next;
+      if (state.session && Array.isArray(state.session.methods)) {
+        const methods = state.session.methods.filter((item) => item !== "dpapi");
+        if (enabled) methods.push("dpapi");
+        state.session.methods = methods;
+      }
+      toast(enabled ? "本机免密已开启。" : "本机免密已关掉，下次要输主密码。");
+      await renderSettings();
+    } catch (exc) {
+      if (exc instanceof ApiError && exc.code === "dpapi_unavailable") {
+        toast("本机免密只在 Windows 上可用。", "warn", exc.hint || "这台机器上没有对应的系统保护接口。");
+        if (button) {
+          button.disabled = true;
+          button.textContent = "不可用";
+        }
+      } else {
+        reportError(exc);
+        if (button) button.disabled = false;
+      }
+    } finally {
+      progressDone();
+    }
+  }
+
+  /* ---- 改主密码（POST /api/vault/password） --------------------------------
+   * 强度照样只听后端：422 回来就把 entropy / level 摆上，主按钮改叫「仍要使用」，
+   * 再点一次补 force:true。**当前主密码允许留空**：用恢复码或本机免密进来的用户，
+   * 手上大概率没有当前主密码（后端此时按 null 处理）。
+   * ------------------------------------------------------------------------ */
+  function openChangePasswordDialog() {
+    const error = el("p", { cls: "pv-alert", attrs: { id: "pv-cp-error", role: "alert" }, props: { hidden: true } });
+    const strength = el("div", { cls: "pv-strength", attrs: { id: "pv-cp-strength" }, props: { hidden: true } }, [
+      el("p", { cls: "pv-strength-line", attrs: { id: "pv-cp-strength-line" } }),
+      el("p", { cls: "pv-hint pv-hint-tight", text: "强度由服务端算，网页不自己估。" }),
+    ]);
+    const current = el("input", {
+      cls: "pv-input", attrs: { id: "pv-cp-current", type: "password", autocomplete: "current-password", placeholder: "留空即可" },
+    });
+    const next = el("input", {
+      cls: "pv-input", attrs: { id: "pv-cp-new", type: "password", autocomplete: "new-password", placeholder: "新主密码" },
+    });
+    const confirm = el("input", {
+      cls: "pv-input", attrs: { id: "pv-cp-confirm", type: "password", autocomplete: "new-password", placeholder: "把新主密码再打一遍" },
+    });
+    let force = false;
+
+    openModal({
+      title: "改主密码",
+      body: [
+        error,
+        formFieldRow("当前主密码", current),
+        el("p", { cls: "pv-hint pv-hint-tight", text: "如果你是用恢复码或本机免密进来的，这一栏留空就行。" }),
+        formFieldRow("新主密码", next),
+        formFieldRow("确认新主密码", confirm),
+        strength,
+        el("p", { cls: "pv-hint", text: "改完会用新密码重写头部密钥封装，所有快照里的旧文件仍得用旧密码打开。" }),
+      ],
+      actions: [
+        { label: "取消", autofocus: true },
+        {
+          label: "改主密码",
+          kind: "primary",
+          id: "pv-cp-submit",
+          keepOpen: true,
+          onClick: () => submitChangePassword({
+            current: current, next: next, confirm: confirm,
+            error: error, strength: strength,
+            forceRef: () => force, setForce: (value) => { force = value; },
+          }),
+        },
+      ],
+    });
+  }
+
+  async function submitChangePassword(ctx) {
+    const error = ctx.error;
+    const button = $("pv-cp-submit");
+    function fail(message) {
+      error.hidden = false;
+      error.textContent = message;
+    }
+    error.hidden = true;
+    error.textContent = "";
+
+    const nextValue = ctx.next.value;
+    const confirmValue = ctx.confirm.value;
+    if (!nextValue) {
+      fail("先填新主密码。");
+      ctx.next.focus();
+      return;
+    }
+    if (nextValue !== confirmValue) {
+      fail("两次输入的新主密码不一样。");
+      ctx.confirm.value = "";
+      ctx.confirm.focus();
+      return;
+    }
+
+    const payload = {
+      current: ctx.current.value ? ctx.current.value : null,
+      new: nextValue,
+      confirm: confirmValue,
+      force: !!ctx.forceRef(),
+    };
+    if (button) button.disabled = true;
+    progressStart();
+    try {
+      const data = await apiRequest("POST", "/api/vault/password", payload);
+      closeModal();
+      toast("主密码已改。", "info", "已重写 " + num(data && data.records, 0) + " 条记录的密钥封装。");
+      await refreshSession({ silent: true }).catch(() => { /* 会话刷新失败不拦业务流程 */ });
+      if (state.page === "settings") await renderSettings();
+    } catch (exc) {
+      if (exc instanceof ApiError && exc.code === "bad_current_password") {
+        fail("当前主密码不对。用恢复码或本机免密进来的话，这一栏留空。");
+        ctx.current.value = "";
+        ctx.current.focus();
+        return;
+      }
+      if (exc instanceof ApiError && exc.code === "weak_password") {
+        const info = exc.data || {};
+        const bits = typeof info.entropy === "number" && isFinite(info.entropy) ? info.entropy.toFixed(1) : "未知";
+        setText("pv-cp-strength-line", "强度不足：熵值约 " + bits + " 比特" + (info.level ? "（" + String(info.level) + "）" : "") + "。");
+        ctx.strength.hidden = false;
+        fail(describeError(exc) + " 点「仍要使用」就按这个密码改。");
+        ctx.setForce(true);
+        if (button) {
+          button.textContent = "仍要使用";
+          button.disabled = false;
+          button.focus();
+        }
+        return;
+      }
+      if (exc instanceof ApiError && exc.code === "missing_current_password") {
+        fail("这次是用主密码进来的，所以要先验证当前主密码。");
+        ctx.current.focus();
+        return;
+      }
+      if (exc instanceof ApiError && exc.code === "password_mismatch") {
+        fail("两次输入的新主密码不一样。");
+        ctx.confirm.value = "";
+        return;
+      }
+      fail(describeError(exc));
+    } finally {
+      if (button) button.disabled = false;
+      progressDone();
+    }
+  }
+
+  /* ---- 重置恢复码（POST /api/vault/recovery） ------------------------------ */
+  function confirmResetRecovery() {
+    confirmDanger({
+      title: "重新生成恢复码",
+      confirmLabel: "生成新恢复码",
+      body: [
+        el("p", { text: "旧恢复码会立刻失效 —— 纸上的那一张当场变成废纸。" }),
+        el("p", { cls: "pv-hint", text: "新码只在下一个界面出现一次，不会存任何地方。" }),
+      ],
+      onConfirm: async () => {
+        progressStart();
+        try {
+          const data = await apiRequest("POST", "/api/vault/recovery", { confirm: true });
+          await showRecoveryPanel({
+            code: data && data.recovery_code ? String(data.recovery_code) : "",
+            note: (data && data.old_invalidated ? "旧恢复码已经失效。" : "")
+              + (data && data.hint ? String(data.hint) : "")
+              + (data && data.records !== undefined ? "（已重写 " + num(data.records, 0) + " 条记录）" : ""),
+            onEnter: async () => {
+              await refreshSession({ silent: true }).catch(() => { /* 同上 */ });
+              if (state.page === "settings") await renderSettings();
+            },
+          });
+        } catch (exc) {
+          reportError(exc);
+        } finally {
+          progressDone();
+        }
+      },
+    });
+  }
+
+  /* ---- 导出明文（GET /api/export） ----------------------------------------
+   * 走 fetch + Blob 而不是 location.href：这样服务端的错误（400 need_confirm
+   * 之类）能翻成 toast，而不是在浏览器里糊一屏 JSON。
+   * ---------------------------------------------------------------------- */
+  function exportFilename(header, fallback) {
+    const raw = String(header || "");
+    const match = raw.match(/filename\*?=(?:UTF-8'')?("?)([^";]+)\1/i);
+    if (match && match[2]) {
+      try {
+        return decodeURIComponent(match[2].trim());
+      } catch (exc) {
+        return match[2].trim();
+      }
+    }
+    return fallback;
+  }
+
+  function confirmExport() {
+    confirmDanger({
+      title: "导出明文",
+      confirmLabel: "我明白风险",
+      body: [
+        el("p", { text: "导出的是明文 —— 等于把密码库的保护全部撤掉。" }),
+        el("p", { cls: "pv-hint", text: "文件里每一条账号和密码都看得见，谁拿到文件谁就拿到全部。" }),
+        el("p", { cls: "pv-hint", text: "用完请立刻删除该文件，别放进网盘、别留在桌面上。" }),
+      ],
+      onConfirm: () => openExportFormatDialog(),
+    });
+  }
+
+  function openExportFormatDialog() {
+    openModal({
+      title: "导出成哪种格式",
+      body: [
+        el("p", { cls: "pv-hint", text: "JSON 保留全部字段与自定义字段；CSV 适合丢进表格软件看。" }),
+      ],
+      actions: [
+        { label: "取消", autofocus: true },
+        { label: "CSV", onClick: () => downloadExport("csv") },
+        { label: "JSON", kind: "primary", onClick: () => downloadExport("json") },
+      ],
+    });
+  }
+
+  async function downloadExport(format) {
+    const url = "/api/export?format=" + encodeURIComponent(format) + "&confirm=1";
+    progressStart();
+    try {
+      const response = await fetch(url, { method: "GET", credentials: "same-origin" });
+      if (!response.ok) {
+        let message = "";
+        try {
+          const payload = await response.json();
+          message = payload && payload.message ? String(payload.message) : "";
+        } catch (exc) {
+          message = "";
+        }
+        throw new ApiError(response.status, message ? "export_failed" : "http_" + response.status, message || defaultHttpMessage(response.status));
+      }
+      const blob = await response.blob();
+      const name = exportFilename(response.headers.get("Content-Disposition"), "pwdvault-export." + format);
+      const href = URL.createObjectURL(blob);
+      const anchor = el("a", { attrs: { href: href, download: name } });
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.setTimeout(() => URL.revokeObjectURL(href), 4000);
+      toast("已导出 " + name, "warn", "用完请立刻删除该文件。");
+    } catch (exc) {
+      reportError(exc, "导出没有成功。");
+    } finally {
+      progressDone();
+    }
   }
 
   /* ================================================================ 13. SSE */
@@ -3317,6 +3841,32 @@
     }
     const dpapi = $("pv-dpapi");
     if (dpapi) dpapi.addEventListener("click", () => submitUnlock("dpapi"));
+
+    // ---- 建库向导（vault_exists === false 时才露面）
+    const setupForm = $("pv-setup-form");
+    if (setupForm) {
+      setupForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        submitSetup();
+      });
+    }
+    const setupToggle = $("pv-setup-toggle");
+    if (setupToggle) setupToggle.addEventListener("click", toggleSetupPassword);
+    const setupPassword = $("pv-setup-password");
+    if (setupPassword) {
+      setupPassword.addEventListener("input", () => {
+        // 改了密码就得重新确认一次「我确定，仍要使用」
+        if (state.setup.force) resetSetupStrength();
+      });
+    }
+
+    // ---- 恢复码面板（建库 / 重置恢复码共用）
+    const recoveryCopy = $("pv-recovery-copy");
+    if (recoveryCopy) recoveryCopy.addEventListener("click", copyRecoveryCode);
+    const recoveryAck = $("pv-recovery-ack");
+    if (recoveryAck) recoveryAck.addEventListener("change", updateRecoveryGate);
+    const recoveryEnter = $("pv-recovery-enter");
+    if (recoveryEnter) recoveryEnter.addEventListener("click", enterRecovery);
 
     // ---- 顶栏
     const toggleSide = $("pv-toggle-sidebar");
@@ -3485,6 +4035,14 @@
     }
 
     // ---- 设置
+    // ---- 设置：安全操作（改主密码 / 重置恢复码 / 导出明文）
+    const changePassword = $("pv-settings-change-password");
+    if (changePassword) changePassword.addEventListener("click", openChangePasswordDialog);
+    const resetRecovery = $("pv-settings-reset-recovery");
+    if (resetRecovery) resetRecovery.addEventListener("click", confirmResetRecovery);
+    const exportBtn = $("pv-settings-export");
+    if (exportBtn) exportBtn.addEventListener("click", confirmExport);
+
     const openVaultDir = $("pv-open-vault-dir");
     if (openVaultDir) {
       openVaultDir.addEventListener("click", async () => {

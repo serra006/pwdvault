@@ -241,7 +241,7 @@ python -m unittest discover -s tests
 ### 4.8 跑测试用的解释器
 
 ```bash
-# 用你这台机器上那个能正常启动的 Python 3.9+
+# 用你这台机器上那个能正常启动的 Python 3.10+
 python -m unittest discover -s tests
 ```
 

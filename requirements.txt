@@ -1,0 +1,9 @@
+# pwdvault 依赖（只有这两个）
+#
+#   pip install -r requirements.txt
+#
+# 没有别的第三方包，也没有构建步骤。Python 需要 3.11 以上
+# （用了 tomllib，3.11 起进标准库）。
+
+argon2-cffi>=23.1.0
+cryptography>=42.0.0

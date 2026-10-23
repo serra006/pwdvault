@@ -55,6 +55,89 @@
   </form>
 </section>
 
+<!-- ============================================================ ①b 建库向导 -->
+<!-- 只在 session.vault_exists === false 时出现（applySession → setMode("setup")）。 -->
+<section class="pv-setup" id="pv-setup" aria-labelledby="pv-setup-title" hidden>
+  <form class="pv-setup-card" id="pv-setup-form" novalidate>
+    <h1 class="pv-unlock-title" id="pv-setup-title">创建你的密码库</h1>
+    <p class="pv-unlock-vault" id="pv-setup-vault">这个位置还没有密码库。</p>
+    <p class="pv-hint pv-hint-tight">
+      主密码不存在任何地方 —— 没有“找回密码”，也没有服务器帮你记。忘了它，
+      就只剩恢复码这一条路。
+    </p>
+
+    <div class="pv-field">
+      <label class="pv-label" for="pv-setup-password">主密码</label>
+      <div class="pv-input-row">
+        <input class="pv-input" id="pv-setup-password" name="password" type="password"
+               autocomplete="new-password" spellcheck="false" placeholder="一句话比一个单词好用">
+        <button class="pv-btn pv-btn-sm" id="pv-setup-toggle" type="button"
+                aria-label="显示或隐藏主密码">显示</button>
+      </div>
+    </div>
+
+    <div class="pv-field">
+      <label class="pv-label" for="pv-setup-confirm">再输一次</label>
+      <input class="pv-input" id="pv-setup-confirm" name="confirm" type="password"
+             autocomplete="new-password" spellcheck="false" placeholder="把主密码原样再打一遍">
+    </div>
+
+    <div class="pv-field">
+      <label class="pv-label" for="pv-setup-label">库名称（可选）</label>
+      <input class="pv-input" id="pv-setup-label" name="label" type="text"
+             autocomplete="off" spellcheck="false" placeholder="留空就叫 pwdvault">
+    </div>
+
+    <label class="pv-check" for="pv-setup-local">
+      <input type="checkbox" id="pv-setup-local" checked>
+      <span>启用本机免密（在这台电脑上不用输主密码）</span>
+    </label>
+
+    <button class="pv-btn pv-btn-primary pv-btn-block" id="pv-setup-submit" type="submit">创建密码库</button>
+
+    <p class="pv-alert" id="pv-setup-error" role="alert" hidden></p>
+
+    <!-- 强度信息只由后端算：这里是 422 weak_password 的展示位，前端不估 entropy -->
+    <div class="pv-strength" id="pv-setup-strength" hidden>
+      <p class="pv-strength-line" id="pv-setup-strength-line"></p>
+      <p class="pv-hint pv-hint-tight">强度由服务端按同一套算法算出来，网页里不自作主张。</p>
+    </div>
+
+    <p class="pv-hint pv-unlock-foot">没有注册、没有找回密码、没有第三方登录 —— 这是本地密码库的代价。</p>
+  </form>
+</section>
+
+<!-- ============================================================ ①c 恢复码展示 -->
+<!-- 建库成功、以及「重新生成恢复码」共用这一份面板（同一套渲染逻辑在 showRecoveryPanel）。 -->
+<section class="pv-setup" id="pv-recovery-view" aria-labelledby="pv-recovery-view-title" hidden>
+  <div class="pv-setup-card" id="pv-recovery-card">
+    <h1 class="pv-unlock-title" id="pv-recovery-view-title">抄下你的恢复码</h1>
+    <p class="pv-hint pv-hint-tight">这个码只显示这一次，关闭后无法再取回。</p>
+
+    <div class="pv-recovery-box">
+      <code class="pv-recovery-code pv-mono" id="pv-recovery-code">（没有拿到恢复码）</code>
+      <button class="pv-btn pv-btn-sm" id="pv-recovery-copy" type="button" aria-label="复制恢复码">复制</button>
+    </div>
+
+    <ul class="pv-warn-list" id="pv-recovery-warnings">
+      <li class="pv-warn-item" data-strong="true">立刻用纸抄下来 —— 只截图、只存文件，都不算备份。</li>
+      <li class="pv-warn-item" data-strong="true">忘了主密码时，它是唯一能打开这份数据的东西。</li>
+      <li class="pv-warn-item" data-strong="true">不要和库文件放在同一个网盘里（一个地方被端就全没了）。</li>
+    </ul>
+
+    <p class="pv-hint pv-hint-tight" id="pv-recovery-note"></p>
+
+    <label class="pv-check" for="pv-recovery-ack">
+      <input type="checkbox" id="pv-recovery-ack">
+      <span>我已抄下恢复码</span>
+    </label>
+
+    <button class="pv-btn pv-btn-primary pv-btn-block" id="pv-recovery-enter" type="button" disabled>
+      进入密码库
+    </button>
+  </div>
+</section>
+
 <!-- ============================================================ ② 主界面 -->
 <div class="pv-main" id="pv-main" hidden>
 
@@ -314,9 +397,15 @@
       <section class="pv-section pv-danger-zone">
         <h3 class="pv-section-title pv-danger-title">危险区</h3>
         <p class="pv-hint">
-          这两个操作会重写头部加密参数。做之前请先确认 <code>snapshots/</code> 里有一份能用的旧文件。
+          前两个会重写头部加密参数：做之前请先确认 <code>snapshots/</code> 里有一份能用的旧文件。
+          第三个会把所有密码写成明文。
         </p>
         <dl class="pv-kv" id="pv-settings-danger"></dl>
+        <div class="pv-row-actions">
+          <button class="pv-btn pv-btn-sm pv-btn-danger-ghost" id="pv-settings-export" type="button">
+            导出明文…
+          </button>
+        </div>
       </section>
     </div>
   </section>

@@ -2,11 +2,12 @@
 
 **能干什么**：接好之后，你直接对 agent 说「把淘宝的密码复制到剪贴板」「帮我看下 GitHub 那个账号的用户名」「网易的验证码多少」，agent 自己调本机密码库拿结果——不用你打开界面、不用你说出密码。
 
-**前提**：① 已经 `pv init` 建过库；② **MCP 侧能自己解锁**——在这台机器上跑一次 `pv local-unlock on` 启用本机免密（推荐）。注意「我只在 Web 界面解锁过」**不算**前提满足：两个进程各有各的密钥，界面解锁不会让 agent 直接可用（见第五节）；③ 客户端支持 stdio 类型的 MCP 连接器。
+**前提**：① 已经建过库；② **MCP 侧能自己解锁**——设置页 → 安全 →「本机免密」打开（推荐）。注意「我只在 Web 界面解锁过」**不算**前提满足：两个进程各有各的密钥，界面解锁不会让 agent 直接可用（见第五节）；③ 客户端支持 stdio 类型的 MCP 连接器。
 
-**大概几步**：打开 Web 界面 → 在「接入 MCP 客户端」那块复制它生成的 JSON → 粘进客户端配置文件 → **重启客户端** → 连接器里看到 `pwdvault` 且有 10 个工具。全程大约 2 分钟，唯一的手工步骤是「粘贴 JSON」，因为 MCP 客户端只认配置文件。
+**大概几步**：打开 Web 界面 → 设置 →「接入 Agent（MCP）」→ 点**复制配置** → 粘进客户端配置文件 → **重启客户端** → 连接器里看到 `pwdvault` 且有 10 个工具。全程大约 2 分钟，唯一的手工步骤是「粘贴 JSON」，因为 MCP 客户端只认配置文件。
 
-> 配置不要手抄。界面上那一段是**按你这台机器现算的**（Python 路径、`pv.py` 路径、库文件路径都取自当前环境），手抄很容易抄错盘符或写错目录。界面入口还没上线的版本，可以用下面的示例照填，把三个路径换成你机器上的真实值。
+> 配置**不要手抄**。界面上那一段是服务端按你这台机器现算的（Python 路径、`pv.py` 路径、库文件路径都取自当前环境），手抄很容易抄错盘符或写错目录。
+> 下面两份 JSON 只是**字段说明用的样子**，里面的路径全是占位符（`<项目目录>`、`<库目录>`、`<Python 路径>`），别照着抄。
 
 ---
 
@@ -18,10 +19,10 @@
 {
   "mcpServers": {
     "pwdvault": {
-      "command": "C:\\Users\\se\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-      "args": ["G:\\deepseek\\pwdvault\\pv.py", "mcp"],
+      "command": "<Python 路径>\\python.exe",
+      "args": ["<项目目录>\\pv.py", "mcp"],
       "env": {
-        "PV_VAULT": "G:\\deepseek\\pwdvault\\data.enc"
+        "PV_VAULT": "<库目录>\\data.enc"
       }
     }
   }
@@ -56,10 +57,10 @@ deepseek-harness 的 MCP 配置段是 **stdio 类型**，所以给的是带 `mcp
 {
   "mcpServers": {
     "pwdvault": {
-      "command": "C:\\Users\\se\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-      "args": ["G:\\deepseek\\pwdvault\\pv.py", "mcp"],
+      "command": "<Python 路径>\\python.exe",
+      "args": ["<项目目录>\\pv.py", "mcp"],
       "env": {
-        "PV_VAULT": "G:\\deepseek\\pwdvault\\data.enc"
+        "PV_VAULT": "<库目录>\\data.enc"
       }
     }
   }
