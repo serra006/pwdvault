@@ -1322,6 +1322,10 @@ def handle_vault_password(req: Request) -> Response:
     否则「路过电脑的人」改掉主密码就能把主人挡在外面（恢复码还在，但这已经是不可逆
     的破坏）。
     """
+    # 先查锁再验参：`_guard_locked` 只负责**翻译** `Locked`，不主动查锁。
+    # 若把参数校验放在前面，锁着时会先返回 422/400 而不是 401 —— 违反 api.py 顶部
+    # 「未解锁一律 401 + code="locked"」的纪律，也顺手把一个强度校验器暴露成了探针。
+    store = _store(req)
     data = req.json_body()
     current = data.get("current")
     new = data.get("new")
@@ -1339,7 +1343,6 @@ def handle_vault_password(req: Request) -> Response:
         if rejection is not None:
             return rejection
 
-    store = _store(req)
     vault = req.state.vault
     if str(getattr(vault, "unlocked_by", "") or "") == UNLOCKED_BY_PASSWORD:
         if not isinstance(current, str) or not current:
@@ -1362,6 +1365,8 @@ def handle_vault_recovery(req: Request) -> Response:
 
     新码和建库时一样只在响应里出现一次：盘上只留它的包裹结果，没有别的地方能取回。
     """
+    # 先查锁再验参，理由见 handle_vault_password
+    store = _store(req)
     data = req.json_body()
     if data.get("confirm") is not True:
         raise HttpError(
@@ -1370,7 +1375,6 @@ def handle_vault_recovery(req: Request) -> Response:
             "重置会让当前恢复码立刻失效，请带 confirm=true 确认。",
         )
 
-    store = _store(req)
     box: dict = {}
 
     def _reset(fresh: Vault) -> bool:
@@ -1391,6 +1395,8 @@ def handle_vault_recovery(req: Request) -> Response:
 
 def handle_vault_local_unlock(req: Request) -> Response:
     """`POST /api/vault/local-unlock` → 本机免密开关（Windows DPAPI）。"""
+    # 先查锁再验参，理由见 handle_vault_password
+    store = _store(req)
     data = req.json_body()
     enabled = data.get("enabled")
     if enabled is None:
@@ -1402,8 +1408,6 @@ def handle_vault_local_unlock(req: Request) -> Response:
             "dpapi_unavailable",
             "本机免密只在 Windows 上可用（依赖系统级 DPAPI）。",
         )
-
-    store = _store(req)
 
     def _apply(fresh: Vault) -> bool:
         if enabled:
@@ -1429,6 +1433,8 @@ def handle_export(req: Request) -> Response:
     且**先审计再输出**（照 `cli.py::cmd_export` 的顺序与理由：审计的枚举写错要在
     明文吐出去之前就炸，而不是先泄了密再发现审计没配上）。
     """
+    # 先查锁再验参，理由见 handle_vault_password
+    store = _store(req)
     if req.query_str("confirm") != "1":
         raise HttpError(
             400,
@@ -1439,7 +1445,6 @@ def handle_export(req: Request) -> Response:
     if fmt not in ("json", "csv"):
         raise HttpError(400, "bad_format", "format 只支持 json 或 csv。")
 
-    store = _store(req)
     vault = store.vault
     query = req.query_str("q", "")
     records = service.search(vault, query) if query else vault.records

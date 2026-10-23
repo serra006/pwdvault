@@ -487,6 +487,32 @@ class LockedGuardTests(unittest.TestCase):
             self.assertEqual(401, status)
             self.assertEqual("locked", payload["code"])
 
+    def test_locked_beats_input_validation(self) -> None:
+        """锁着时，**参数不合法**也必须是 401，不能是 400/422。
+
+        `_guard_locked` 只翻译 `Locked`，不主动查锁 —— 所以 handler 必须把
+        `_store(req)` 放在参数校验**之前**。否则锁着时会先被参数校验挡下来，
+        既违反 api.py 顶部「未解锁一律 401 + locked」的纪律，也等于把
+        「密码强度校验器」暴露成了一个不需要任何凭据的探针。
+        """
+        bad_cases = [
+            # 弱密码：不先查锁的话会走到 weak_password_response → 422
+            ("POST", "/api/vault/password", {"new": "x", "confirm": "x"}),
+            # 两次不一致：不先查锁的话 → 400 password_mismatch
+            ("POST", "/api/vault/password", {"new": STRONG, "confirm": "不一样"}),
+            # 缺 confirm：不先查锁的话 → 400 need_confirm
+            ("POST", "/api/vault/recovery", {}),
+            # 缺 enabled：不先查锁的话 → 400 missing_enabled
+            ("POST", "/api/vault/local-unlock", {}),
+            # 缺 confirm=1：不先查锁的话 → 400 need_confirm
+            ("GET", "/api/export", None),
+        ]
+        for method, path, body in bad_cases:
+            with self.subTest(path=path, body=body):
+                status, payload = self.web.json(method, path, body=body)
+                self.assertEqual(401, status, f"期望 401 locked，实得 {status} {payload}")
+                self.assertEqual("locked", payload["code"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
