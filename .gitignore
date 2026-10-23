@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------- 真实数据（最重要）
+# 这些是「运行起来的产物」，不是源码。任何人拿到 data.enc 只是拿到密文，
+# 但你的库文件、快照、审计日志、暂存草稿、inbox 原始资料都不该进仓库。
+# 用 / 前缀限定项目根：demo/ 下的演示库是**有意保留**的（密码是假的，供体验用）。
+/data.enc
+/snapshots/
+/logs/
+/staging/
+/inbox/
+/processed/
+/runtime.json
+/tombstones.json
+/config.toml
+
+# 任何位置的临时/备份库文件
+*.enc.bak
+*.enc.tmp
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------- 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------- 本地笔记（不进仓库）
+*.local.md

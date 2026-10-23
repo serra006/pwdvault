@@ -1,0 +1,178 @@
+%% pwdvault v1.1 关键时序（与 DESIGN-v1.1.md §5 同源）
+%% 图 1：TXT 拖入 → 草稿 → 人工确认 → 入库
+sequenceDiagram
+    autonumber
+    participant B as 浏览器
+    participant H as HTTP 线程
+    participant W as inbox 守护线程
+    participant S as StagingStore
+    participant L1 as staging/.staging.lock
+    participant VS as VaultStore
+    participant L2 as data.enc.lock
+    participant F as data.enc
+
+    B->>H: POST /api/inbox/upload（文件字节）
+    H->>H: 校验 Host/Origin/token，size <= max_file_bytes
+    H->>H: 写入 inbox/<安全文件名>
+    H-->>B: 202 {"accepted":true,"file_name":"旧账号.txt"}
+    Note over W: stop_event.wait(2) 轮询
+    W->>W: stat inbox -> sha256
+    W->>S: batches_by_hash() + seen_hashes()
+    S-->>W: 未见过
+    W->>W: parse_any(text, notes=[]) -> 5 条草稿
+    W->>L1: hold(timeout=5s)
+    L1-->>W: granted
+    W->>S: create_from_file() -> seal(DEK, inner, aad(vault_id,"staging/"+batch_id))
+    S-->>W: staging/sb_x.enc（status=drafted）
+    W->>L1: release
+    W->>H: bus.publish("staging")
+    H-->>B: SSE event: staging
+    B->>H: POST /api/staging/sb_x/items（逐条编辑/勾选）
+    H->>L1: hold -> 重读批次 -> save_items -> release
+    B->>H: POST /api/staging/sb_x/commit {accept_item_ids}
+    H->>VS: staging.commit(batch_id, store)
+    VS->>L1: hold（保护批次读改写）
+    VS->>L2: hold(timeout=3s)
+    L2-->>VS: granted
+    VS->>F: read_revision()
+    alt 盘上 revision > 内存
+        VS->>F: Vault.open_with_dek(DEK) reload
+    end
+    VS->>VS: ops = [Operation.add(draft, on_id_conflict="skip") x N]
+    VS->>F: save(expected_revision=disk) -> snapshot -> atomic_write(带重试)
+    VS->>L2: release
+    VS->>S: status=committed + before 快照 + commit_result
+    VS->>L1: release
+    VS->>H: on_revision(old,new) -> bus.publish("revision")
+    VS->>W: 源文件移入 inbox/processed/（失败仅记日志）
+    H-->>B: 200 {"committed":5,"revision":43}
+
+%% 图 2：Agent 调 vault_copy（唯一命中 / 歧义 / 未解锁）
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant A as Agent
+    participant M as McpServer
+    participant T as ToolRegistry
+    participant VS as VaultStore
+    participant R as Redactor
+    participant C as 剪贴板
+    participant AU as audit.jsonl
+
+    U->>A: 把淘宝密码复制到剪贴板
+    A->>M: tools/call {name:"vault_copy", arguments:{query:"淘宝"}}
+    M->>T: dispatch("vault_copy", args)
+    T->>VS: McpSession.require_vault()
+    alt 未解锁
+        VS-->>T: Locked
+        T-->>M: isError {code:"locked", hint:"先运行 pv local-unlock on"}
+    else 已解锁
+        T->>VS: service.search(query, limit=10)
+        VS-->>T: [淘宝]
+        alt 0 条
+            T-->>M: isError {code:"record_not_found"}
+        else >=2 条
+            T->>R: redact_records(candidates, profile="agent")
+            R-->>T: [{id,title,username}]
+            T-->>M: isError {code:"ambiguous_record", candidates:[...]}
+            M-->>A: 结构化歧义
+            A-->>U: 你是指「淘宝」还是「淘宝联盟」？
+        else 唯一命中
+            T->>T: value = record.password（局部变量，不进任何 dict）
+            T->>C: copy_with_autoclear(value, 30, spawn=False)
+            T->>AU: append({action:"copy", record_id, field})
+            T->>T: del value
+            T-->>M: {copied:true,title,field,auto_clear_in:30,host}
+            M-->>A: result（内存中已无明文）
+            A-->>U: 已复制淘宝密码，30 秒后自动清空
+        end
+    end
+
+%% 图 3：并发写 rebase
+sequenceDiagram
+    autonumber
+    participant U as UI 线程
+    participant M as MCP 进程
+    participant L as data.enc.lock
+    participant VS as VaultStore
+    participant F as data.enc
+
+    M->>L: LK_NBLCK(offset 0) 重试至 10s
+    L-->>M: granted
+    U->>L: LK_NBLCK 立即 EACCES -> 25ms 重试
+    M->>F: read_revision() = 41
+    M->>VS: 内存 revision == 41，无需 reload
+    M->>F: save(expected_revision=41) -> revision=42
+    M->>L: release
+    L-->>U: granted
+    U->>F: read_revision() = 42
+    U->>VS: 内存 41 != 42 -> reload
+    VS->>F: open_with_dek(DEK, expected_vault_id)
+    F-->>VS: records（含 M 的新记录）
+    U->>VS: 应用 ops（update id=a3f9c1, expected_updated=...）
+    alt 同一条被 M 改过
+        VS-->>U: CommitResult(conflicts=[Conflict(kind="stale")])
+        Note over VS,F: 不写盘，revision 仍为 42
+        U-->>U: 409 record_conflict（保留我的/采用新的/并排看）
+    else 无重叠
+        U->>F: save(expected_revision=42) -> revision=43
+        U->>U: bus.publish("revision", delta=+1)
+    end
+    U->>L: release
+
+%% 图 4：UI 通过 SSE 收到 MCP 写入
+sequenceDiagram
+    autonumber
+    participant M as MCP 进程
+    participant F as data.enc
+    participant P as Web revision 轮询线程（2s）
+    participant VS as VaultStore
+    participant BUS as EventBus
+    participant SSE as SSE handler 线程
+    participant JS as app.js
+
+    M->>F: 写盘（revision 42->43，count +2）
+    loop 每 2s
+        P->>F: os.stat -> (mtime_ns, size)
+        P->>P: 与缓存比对，变了
+        P->>VS: refresh() -> read_revision()=43 != 42
+        VS->>F: 读文件 + open_with_dek(DEK)
+        VS-->>P: reloaded=True
+        P->>BUS: publish("revision", {revision:43, count:318, delta:2, source:"external"})
+    end
+    BUS-->>SSE: queue.get()
+    SSE-->>JS: "event: revision\ndata: {...}\n\n"（chunked，逐块 flush）
+    JS->>JS: 非编辑态 -> 静默更新 + toast「已同步（+2 条）」
+    JS->>JS: 正在编辑同一条 -> 冲突三选一
+    SSE-->>JS: ": keepalive"（15s 一次）
+
+%% 图 5：MCP 解锁链
+sequenceDiagram
+    autonumber
+    participant C as MCP 客户端
+    participant M as McpServer
+    participant RT as runtime.json
+    participant D as DPAPI
+    participant E as PV_MASTER_PASSWORD
+    participant V as Vault
+
+    C->>M: initialize
+    M-->>C: {protocolVersion, capabilities.tools, serverInfo, instructions}
+    C->>M: notifications/initialized（无响应）
+    C->>M: tools/call vault_status
+    M->>M: McpSession.maybe_idle_lock()
+    M->>RT: read_runtime() + is_alive()
+    alt 探测到且 P1 代理启用（本迭代 NotImplementedError）
+        M->>M: 落回本地解锁
+    end
+    M->>D: Vault.open(allow_dpapi=True)
+    alt DPAPI 不可用
+        M->>E: os.environ["PV_MASTER_PASSWORD"]
+        alt 未设置
+            M-->>C: isError {code:"locked", hint:"先运行 pv local-unlock on 启用本机免密"}
+        else 已设置
+            M->>V: Vault.open(password=env)
+        end
+    end
+    V-->>M: 已解锁 Vault（DEK 仅在进程内存）
+    M-->>C: {exists, unlocked:true, revision, count, pending_staging, ...}

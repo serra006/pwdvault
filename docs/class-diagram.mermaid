@@ -1,0 +1,356 @@
+%% pwdvault v1.1 核心类图（只画新增/改动，v1.0 未变更字段省略）
+classDiagram
+    direction TB
+
+    %% ---------- L0 ----------
+    class Record {
+        +str id
+        +str title
+        +str username
+        +str password
+        +str url
+        +str notes
+        +str totp
+        +list~str~ tags
+        +dict~str,str~ fields
+        +str created
+        +str updated
+        +str pw_changed
+        +to_dict(mask_secrets: bool) dict
+        +from_dict(raw, record_id, keep_id) Record
+        +apply_changes(changes: dict) bool
+        +haystack() str
+        +masked_password() str
+    }
+    class SensitiveKeys {
+        <<module>>
+        +tuple SENSITIVE_TOKENS
+        +frozenset NON_SENSITIVE_KEYS
+        +str MASK
+        +is_sensitive_key(name: str) bool
+        +mask_value(value: str) str
+    }
+    class VaultError {
+        +str code
+        +int exit_code
+        +str message
+        +str hint
+        +to_dict() dict
+    }
+    class Settings {
+        +Path vault_path
+        +int snapshot_keep
+        +int clipboard_seconds
+        +int auto_lock_seconds
+        +dict kdf
+        +web_port
+        +inbox_dir
+        +staging_lease_seconds
+        +mcp_auto_lock_seconds
+    }
+
+    %% ---------- L1 ----------
+    class Vault {
+        +Settings settings
+        +dict header
+        +bytes dek
+        +list~Record~ records
+        +str unlocked_by
+        +bool dirty
+        +vault_id() str
+        +revision() int
+        +create(settings, pw, enable_dpapi, label)$ tuple
+        +open(settings, password, recovery_code, allow_dpapi)$ Vault
+        +open_with_dek(settings, dek, expected_vault_id)$ Vault
+        +save(first: bool, expected_revision: int) None
+        +snapshot_now() None
+        +find_by_id(record_id) Record
+        +rewrap_password(new_pw) None
+        +enable_local_unlock() None
+        +reset_recovery() str
+    }
+    class VaultIO {
+        <<module>>
+        +read_header(path) dict
+        +read_revision(path) int
+        +atomic_write(path, data) None
+        +inspect(settings) dict
+    }
+
+    %% ---------- L2 ----------
+    class Operation {
+        +str kind
+        +str record_id
+        +Record record
+        +dict changes
+        +str expected_updated
+        +str on_id_conflict
+        +add(record, on_id_conflict)$ Operation
+        +update(record_id, changes, expected_updated)$ Operation
+        +delete(record_id)$ Operation
+    }
+    class Conflict {
+        +str record_id
+        +str kind
+        +dict mine
+        +dict theirs
+    }
+    class CommitResult {
+        +int revision
+        +int added
+        +int updated
+        +int deleted
+        +list~str~ applied_ids
+        +list~Conflict~ conflicts
+        +bool reloaded
+    }
+    class LockManager {
+        +Path lock_path
+        +float default_timeout
+        +float poll_seconds
+        +hold(timeout, purpose) Iterator
+        +busy() bool
+    }
+    class VaultStore {
+        +Settings settings
+        +Vault vault
+        +LockManager lock
+        +revision() int
+        +disk_revision() int
+        +refresh() bool
+        +mutate_header(fn, timeout) int
+        +commit(operations, expected_revision, timeout, reload_policy) CommitResult
+    }
+    class Redactor {
+        <<module>>
+        +redact_record(record, profile, reveal_fields) dict
+        +redact_records(records, profile, reveal_fields) list
+        +public_error(exc, candidates) dict
+        +assert_no_secret(payload, probes) None
+    }
+    class Clipboard {
+        <<module>>
+        +copy_text(text) None
+        +spawn_clear_watcher(digest, seconds) bool
+        +copy_with_autoclear(text, seconds, spawn) bool
+    }
+    class Importers {
+        <<module>>
+        +parse_any(text, filename, fmt, source_name, notes) list~Record~
+        +detect_format(text, filename) str
+    }
+
+    %% ---------- L3 ----------
+    class Warning {
+        +str code
+        +str level
+        +str message
+        +str field
+    }
+    class StagingItem {
+        +str item_id
+        +Record draft
+        +str origin
+        +bool accepted
+        +bool edited
+        +list~Warning~ warnings
+        +dict conflict
+        +dict before
+        +to_public(reveal) dict
+    }
+    class StagingBatch {
+        +str batch_id
+        +str status
+        +dict source
+        +list~StagingItem~ items
+        +str origin
+        +str created
+        +str updated
+        +dict lease
+        +dict editor
+        +dict commit
+        +str notes
+        +to_public(reveal) dict
+    }
+    class StagingStore {
+        +Settings settings
+        -LockManager lock
+        +list_batches(statuses, include_finished) list
+        +get(batch_id) StagingBatch
+        +create_from_file(path, text, drafts, notes, origin) StagingBatch
+        +create_manual(source_name) StagingBatch
+        +claim(batch_id, holder, lease_seconds) StagingBatch
+        +submit(batch_id, records, holder, summary) StagingBatch
+        +save_items(batch_id, items, editor) StagingBatch
+        +begin_edit(batch_id, holder) StagingBatch
+        +end_edit(batch_id) StagingBatch
+        +transition(batch_id, to_status, reason) StagingBatch
+        +commit(batch_id, store, accept_item_ids, mode, timeout) dict
+        +rollback(batch_id, store) dict
+        +discard(batch_id, delete_source) None
+        +expire_leases() int
+        +tombstone(sha256, file_name) None
+        +batches_by_hash() dict
+    }
+    class InboxWatcher {
+        +Settings settings
+        +StagingStore staging
+        +start() None
+        +stop(timeout) None
+        +scan_once() list~str~
+        +status() dict
+    }
+    class Service {
+        <<module>>
+        +search(vault, query, limit) list~Record~
+        +resolve(vault, ref) Record
+        +add(vault, record) Record
+        +update(vault, record, changes) Record
+        +delete(vault, record) None
+        +merge_import(vault, incoming, mode, apply) dict
+        +validate_records(vault, records, seen) list
+        +copy_field(vault, record, field, seconds) dict
+        +totp_code(secret, digits, period, at) tuple
+        +health(vault) dict
+    }
+    class Audit {
+        <<module>>
+        +record(source, action, record_id, field, ok) None
+    }
+    class RuntimeInfo {
+        +int pid
+        +int port
+        +str token
+        +str vault_path
+        +read_runtime(home)$ RuntimeInfo
+        +is_alive(info)$ bool
+        +write_runtime(home, info)$ None
+        +clear_runtime(home)$ None
+    }
+    class ProxyBackend {
+        <<P1 stub>>
+        +open(settings) Vault
+        +call(tool, arguments) dict
+    }
+
+    %% ---------- L4 ----------
+    class EventBus {
+        +subscribe() Queue
+        +unsubscribe(q) None
+        +publish(event, data) None
+    }
+    class AppState {
+        +Settings settings
+        +VaultStore store
+        +StagingStore staging
+        +InboxWatcher watcher
+        +EventBus bus
+        +str token
+        +int port
+        +unlock(password, recovery_code, use_dpapi) Vault
+        +lock() None
+        +require_unlocked() VaultStore
+        +start_background(port) None
+        +idle_seconds() int
+    }
+    class ToolRegistry {
+        +list_specs() list~dict~
+        +dispatch(name, arguments) dict
+        -_tool_status(args) dict
+        -_tool_search(args) dict
+        -_tool_get(args) dict
+        -_tool_copy(args) dict
+        -_tool_totp(args) dict
+        -_tool_add(args) dict
+        -_tool_update(args) dict
+        -_tool_staging_list(args) dict
+        -_tool_staging_claim(args) dict
+        -_tool_staging_submit(args) dict
+    }
+
+    %% ---------- L5 ----------
+    class McpServer {
+        +Settings settings
+        +StdioTransport transport
+        +ToolRegistry tools
+        +McpSession session
+        +serve_forever() int
+        +handle_message(msg) dict
+        +unlock_chain(settings) tuple
+    }
+    class StdioTransport {
+        +read_message() dict
+        +write_message(msg) None
+    }
+    class McpSession {
+        +VaultStore store
+        +float last_call
+        +str unlocked_by
+        +require_vault() VaultStore
+        +maybe_idle_lock() None
+    }
+    class HttpServer {
+        +ThreadingHTTPServer server
+        +AppState state
+        +serve() None
+        -_check_host(h) bool
+        -_check_token(h) bool
+        -_serve_sse(h) None
+        -_send_json(h, code, payload) None
+    }
+
+    %% ---------- L6 ----------
+    class Cli {
+        +build_parser() ArgumentParser
+        +unlock(args, settings) Vault
+        +save_or_fail(vault) None
+        +cmd_web(args, settings) int
+        +cmd_mcp(args, settings) int
+    }
+
+    %% ---------- 关系 ----------
+    Vault "1" o-- "*" Record
+    VaultStore "1" o-- "1" Vault
+    VaultStore "1" *-- "1" LockManager
+    LockManager ..> VaultIO : 断言 revision
+    VaultStore ..> Operation
+    VaultStore ..> CommitResult
+    CommitResult "1" o-- "*" Conflict
+    Operation ..> Record : apply_changes
+    StagingStore "1" o-- "*" StagingBatch
+    StagingBatch "1" o-- "*" StagingItem
+    StagingItem "1" o-- "1" Record
+    StagingItem "1" o-- "*" Warning
+    StagingStore "1" *-- "1" LockManager : staging/.staging.lock
+    StagingStore ..> VaultStore : commit(ops)
+    StagingStore ..> Redactor : to_public
+    InboxWatcher ..> StagingStore : create_from_file
+    InboxWatcher ..> Importers : parse_any
+    AppState "1" o-- "1" VaultStore
+    AppState "1" o-- "1" StagingStore
+    AppState "1" o-- "1" InboxWatcher
+    AppState "1" o-- "1" EventBus
+    AppState ..> RuntimeInfo : agent 在线探测
+    ToolRegistry ..> VaultStore
+    ToolRegistry ..> StagingStore
+    ToolRegistry ..> Redactor : 唯一出口
+    ToolRegistry ..> Clipboard
+    ToolRegistry ..> Audit
+    McpServer "1" *-- "1" StdioTransport
+    McpServer "1" o-- "1" ToolRegistry
+    McpServer "1" o-- "1" McpSession
+    McpServer ..> ProxyBackend : P1 探测桩
+    HttpServer "1" o-- "1" AppState
+    Cli ..> HttpServer
+    Cli ..> McpServer
+    Cli ..> VaultStore : save_or_fail
+    Service ..> Vault
+    Service ..> Record
+    Importers ..> Record
+    Redactor ..> Record
+    Redactor ..> SensitiveKeys
+    VaultError <|-- LockTimeout
+    VaultError <|-- RecordConflict
+    VaultError <|-- StagingBusy
+    VaultError <|-- Locked
+    VaultError <|-- StaleWrite

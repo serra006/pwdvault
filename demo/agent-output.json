@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "title": "阿里云",
+      "username": "aliyun_user",
+      "password": "Ali#Cloud2024",
+      "url": "https://account.aliyun.com",
+      "tags": ["云服务", "付费"],
+      "AccessKey ID": "LTAI5tXXXXXXXXXXXX",
+      "AccessKey Secret": "请勿外传",
+      "备注": "按量付费，注意余额"
+    },
+    {
+      "title": "腾讯云",
+      "username": "tencent_user",
+      "password": "Tx#Cloud2024",
+      "url": "https://console.cloud.tencent.com",
+      "tags": ["云服务"],
+      "SecretId": "AKIDxxxxxxxx",
+      "SecretKey": "another-secret"
+    }
+  ]
+}

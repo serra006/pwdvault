@@ -1,0 +1,19 @@
+淘宝
+账号: zhangsan@example.com
+密码: Tb#2024xy
+网址: https://taobao.com
+备注: 主要购物号
+
+京东
+账号: lisi
+密码: Jd@9988
+密保问题: 出生城市
+
+知乎 | zhihu_user | Zh#2021
+GitHub	gh_user	Gh@pass123
+
+企业邮箱
+账号：me@example.com
+密码：Mail@2024!x
+TOTP: JBSWY3DPEHPK3PXP
+绑定手机：13800138000

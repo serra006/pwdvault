@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pwdvault</title>
+<!--
+  pwdvault Web UI（T10 + T11）
+  纪律（DESIGN §11.4）：
+    1. 本文件只放「静态骨架」，不含任何来自服务端的内容；
+    2. 样式全在 /app.css，脚本全在 /app.js（CSP: default-src 'self'，不写内联 style/script）；
+    3. 首屏主题在 app.js 顶部同步设置（head 内同步加载，故不会白闪）。
+-->
+<link rel="stylesheet" href="/app.css">
+<!-- 空 favicon：避免浏览器去要 /favicon.ico 拿到 404（那是唯一一条“控制台报错”） -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f6f4f'/%3E%3Cpath d='M5 7.5V6a3 3 0 0 1 6 0v1.5' fill='none' stroke='%23fff' stroke-width='1.4'/%3E%3Crect x='4' y='7.5' width='8' height='5.5' rx='1.2' fill='%23fff'/%3E%3C/svg%3E">
+<script src="/app.js"></script>
+</head>
+<body>
+
+<!-- ============================================================ ① 解锁视图 -->
+<section class="pv-unlock" id="pv-unlock" aria-labelledby="pv-unlock-title" hidden>
+  <form class="pv-unlock-card" id="pv-unlock-form" novalidate>
+    <h1 class="pv-unlock-title" id="pv-unlock-title">pwdvault</h1>
+    <p class="pv-unlock-vault" id="pv-unlock-vault">正在读取密码库…</p>
+
+    <div class="pv-field">
+      <label class="pv-label" for="pv-password">主密码</label>
+      <input class="pv-input" id="pv-password" name="password" type="password"
+             autocomplete="current-password" spellcheck="false" placeholder="输入主密码">
+    </div>
+    <button class="pv-btn pv-btn-primary pv-btn-block" id="pv-unlock-submit" type="submit">解锁</button>
+
+    <p class="pv-alert" id="pv-unlock-error" role="alert" hidden></p>
+
+    <button class="pv-btn pv-btn-ghost pv-btn-block" id="pv-dpapi" type="button" hidden>
+      用这台电脑直接进入
+    </button>
+
+    <details class="pv-details" id="pv-recovery-wrap">
+      <summary>用恢复码解锁</summary>
+      <div class="pv-details-body">
+        <label class="pv-label" for="pv-recovery">恢复码</label>
+        <input class="pv-input" id="pv-recovery" name="recovery_code" type="text"
+               autocomplete="off" spellcheck="false" placeholder="PV-XXXX-XXXX-XXXX-XXXX">
+        <button class="pv-btn pv-btn-block" id="pv-recovery-submit" type="button">用恢复码解锁</button>
+        <p class="pv-hint">
+          恢复码只在初始化密码库时显示过一次。都丢了的话，只能从
+          <code>snapshots/</code> 目录里挑一个旧文件回滚（见 README「用快照恢复」一节）。
+        </p>
+      </div>
+    </details>
+
+    <p class="pv-hint pv-unlock-foot">没有注册、没有找回密码、没有第三方登录 —— 这是本地密码库的代价。</p>
+  </form>
+</section>
+
+<!-- ============================================================ ② 主界面 -->
+<div class="pv-main" id="pv-main" hidden>
+
+  <!-- 顶部状态条 44px -->
+  <header class="pv-topbar">
+    <div class="pv-topbar-left">
+      <button class="pv-icon-btn" id="pv-toggle-sidebar" type="button"
+              aria-label="折叠或展开侧栏" aria-expanded="true" title="折叠或展开侧栏">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+          <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" fill="none"></path>
+        </svg>
+      </button>
+      <span class="pv-vault-name" id="pv-vault-name">pwdvault</span>
+      <span class="pv-lockdot" id="pv-lockdot" aria-hidden="true"></span>
+      <span class="pv-topbar-state" id="pv-lock-state">已锁定</span>
+    </div>
+    <div class="pv-topbar-right">
+      <span class="pv-meta" id="pv-revision">修订 –</span>
+      <span class="pv-meta" id="pv-agent">Agent 状态未知</span>
+      <div class="pv-theme" role="group" aria-label="主题">
+        <button type="button" data-theme-pref="system">跟随</button>
+        <button type="button" data-theme-pref="light">浅色</button>
+        <button type="button" data-theme-pref="dark">深色</button>
+      </div>
+      <button class="pv-btn pv-btn-ghost pv-btn-sm" id="pv-lock-now" type="button">锁定</button>
+    </div>
+  </header>
+
+  <!-- 左栏 220px -->
+  <aside class="pv-sidebar" id="pv-sidebar" aria-label="导航">
+    <div class="pv-sidebar-scroll">
+      <div class="pv-search">
+        <label class="pv-sr-only" for="pv-search-input">搜索记录</label>
+        <input class="pv-input" id="pv-search-input" type="search" autocomplete="off"
+               spellcheck="false" placeholder="搜索  Ctrl+K">
+      </div>
+
+      <div class="pv-group">
+        <p class="pv-group-title">视图</p>
+        <ul class="pv-view-list" id="pv-views"></ul>
+      </div>
+
+      <div class="pv-group">
+        <p class="pv-group-title">标签</p>
+        <ul class="pv-tag-list" id="pv-tag-list"></ul>
+        <p class="pv-hint pv-hint-tight" id="pv-tag-empty">还没有标签</p>
+      </div>
+
+      <div class="pv-group pv-group-create">
+        <button class="pv-btn pv-btn-block" id="pv-new-record" type="button">+ 新建记录</button>
+      </div>
+    </div>
+
+    <nav class="pv-sidebar-foot" aria-label="其它页面">
+      <button class="pv-navitem" id="pv-goto-staging" type="button" data-page="staging">
+        <span class="pv-navitem-text">待整理</span>
+        <span class="pv-badge" id="pv-staging-badge" hidden>0</span>
+      </button>
+      <button class="pv-navitem" id="pv-goto-health" type="button" data-page="health">
+        <span class="pv-navitem-text">健康检查</span>
+      </button>
+      <button class="pv-navitem" id="pv-goto-settings" type="button" data-page="settings">
+        <span class="pv-navitem-text">设置</span>
+      </button>
+    </nav>
+  </aside>
+
+  <!-- 中栏：列表 -->
+  <section class="pv-list-pane" id="pv-list-pane" aria-label="记录列表">
+    <div class="pv-list-head">
+      <span id="pv-list-summary">共 0 条</span>
+      <span class="pv-list-note" id="pv-list-note" hidden></span>
+    </div>
+    <ul class="pv-list" id="pv-list" role="listbox" tabindex="0" aria-label="记录列表"></ul>
+    <div class="pv-skeleton" id="pv-list-skeleton" hidden aria-hidden="true">
+      <div class="pv-skeleton-row"></div>
+      <div class="pv-skeleton-row"></div>
+      <div class="pv-skeleton-row"></div>
+    </div>
+    <div class="pv-empty" id="pv-list-empty" hidden></div>
+  </section>
+
+  <!-- 右栏：详情 -->
+  <section class="pv-detail-pane" id="pv-detail-pane" aria-label="记录详情">
+    <div class="pv-empty" id="pv-detail-empty"></div>
+
+    <article class="pv-detail" id="pv-detail" hidden>
+      <header class="pv-detail-head">
+        <div class="pv-detail-titlewrap">
+          <h2 class="pv-detail-title" id="pv-detail-title" tabindex="0" title="双击或用 Ctrl+Enter 编辑标题"></h2>
+          <input class="pv-input pv-detail-title-input" id="pv-detail-title-input" hidden
+                 aria-label="记录标题" spellcheck="false">
+        </div>
+        <div class="pv-detail-actions">
+          <button class="pv-btn pv-btn-primary pv-btn-sm" id="pv-copy-password" type="button">复制密码</button>
+          <button class="pv-btn pv-btn-sm" id="pv-copy-username" type="button">复制账号</button>
+          <button class="pv-btn pv-btn-sm" id="pv-open-url" type="button">打开网址</button>
+          <button class="pv-btn pv-btn-sm" id="pv-edit-record" type="button">编辑</button>
+          <button class="pv-btn pv-btn-sm pv-btn-danger-ghost" id="pv-delete-record" type="button">删除</button>
+        </div>
+      </header>
+
+      <div class="pv-banner-slot" id="pv-detail-banner"></div>
+
+      <dl class="pv-fields" id="pv-detail-fields"></dl>
+
+      <section class="pv-section" id="pv-detail-custom-wrap" hidden>
+        <h3 class="pv-section-title">自定义字段</h3>
+        <dl class="pv-fields" id="pv-detail-custom"></dl>
+      </section>
+
+      <section class="pv-section" id="pv-detail-notes-wrap" hidden>
+        <h3 class="pv-section-title">备注</h3>
+        <div class="pv-notes" id="pv-detail-notes"></div>
+      </section>
+
+      <footer class="pv-detail-meta" id="pv-detail-meta"></footer>
+    </article>
+  </section>
+
+  <!-- ③ 待整理 -->
+  <section class="pv-page" id="pv-page-staging" hidden aria-labelledby="pv-page-staging-title">
+    <div class="pv-page-inner">
+      <header class="pv-page-head">
+        <h2 class="pv-page-title" id="pv-page-staging-title">待整理</h2>
+        <p class="pv-page-sub" id="pv-staging-watch">正在读取监听状态…</p>
+      </header>
+
+      <div class="pv-dropzone" id="pv-dropzone" role="region" aria-label="拖拽区">
+        <div class="pv-dropzone-inner">
+          <p class="pv-dropzone-title">把 TXT / CSV / JSON 拖到这里</p>
+          <p class="pv-hint pv-hint-tight">也可以直接放进 inbox 文件夹，我盯着呢。</p>
+          <div class="pv-dropzone-actions">
+            <button class="pv-btn pv-btn-sm" id="pv-open-inbox" type="button">打开 inbox 文件夹</button>
+            <button class="pv-btn pv-btn-sm pv-btn-ghost" id="pv-pick-file" type="button">选择文件…</button>
+            <input type="file" id="pv-file-input" accept=".txt,.csv,.json,.md,.log,.tsv" multiple hidden>
+          </div>
+        </div>
+      </div>
+
+      <div class="pv-staging-body">
+        <aside class="pv-batch-col" aria-label="批次列表">
+          <p class="pv-group-title">批次</p>
+          <ul class="pv-batch-list" id="pv-batch-list"></ul>
+          <p class="pv-hint pv-hint-tight" id="pv-batch-empty">暂无批次</p>
+        </aside>
+
+        <div class="pv-item-col">
+          <div class="pv-batch-head" id="pv-batch-head" hidden>
+            <span class="pv-batch-head-title" id="pv-batch-head-title"></span>
+            <span class="pv-meta" id="pv-batch-head-meta"></span>
+          </div>
+          <div class="pv-banner-slot" id="pv-staging-banner"></div>
+          <div class="pv-item-list" id="pv-item-list"></div>
+          <div class="pv-empty" id="pv-staging-empty">
+            这里会放需要你确认的整理结果。把文件拖进来试试。
+          </div>
+        </div>
+      </div>
+
+      <footer class="pv-staging-foot" id="pv-staging-foot" hidden>
+        <button class="pv-btn pv-btn-sm" id="pv-accept-all" type="button">全选</button>
+        <span class="pv-meta" id="pv-accept-count">已接受 0 / 0 条</span>
+        <span class="pv-mode" id="pv-mode" role="group" aria-label="遇到重复记录怎么办">
+          <span class="pv-mode-label">重复时</span>
+          <button type="button" data-mode="skip">跳过</button>
+          <button type="button" data-mode="overwrite">覆盖</button>
+          <button type="button" data-mode="append">新建副本</button>
+        </span>
+        <span class="pv-foot-spacer"></span>
+        <button class="pv-btn pv-btn-sm pv-btn-ghost" id="pv-rollback" type="button" hidden>撤销这批入库</button>
+        <button class="pv-btn pv-btn-sm pv-btn-danger-ghost" id="pv-discard" type="button">丢弃整个批次</button>
+        <button class="pv-btn pv-btn-sm pv-btn-primary" id="pv-commit" type="button" disabled>提交 0 条</button>
+      </footer>
+    </div>
+  </section>
+
+  <!-- ④ 健康检查 -->
+  <section class="pv-page" id="pv-page-health" hidden aria-labelledby="pv-page-health-title">
+    <div class="pv-page-inner">
+      <header class="pv-page-head">
+        <h2 class="pv-page-title" id="pv-page-health-title">健康检查</h2>
+        <p class="pv-page-sub">只看统计与标题，密码本来就看不到。</p>
+      </header>
+
+      <div class="pv-stat-grid" id="pv-health-stats"></div>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">弱密码</h3>
+        <ul class="pv-plain-list" id="pv-health-weak"></ul>
+        <p class="pv-hint" id="pv-health-weak-empty">没有弱密码，挺好。</p>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">复用密码</h3>
+        <ul class="pv-plain-list" id="pv-health-reused"></ul>
+        <p class="pv-hint" id="pv-health-reused-empty">没有复用同一密码的条目。</p>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">超过 365 天没换</h3>
+        <ul class="pv-plain-list" id="pv-health-stale"></ul>
+        <p class="pv-hint" id="pv-health-stale-empty">没有超过一年的密码。</p>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">备份提醒</h3>
+        <div class="pv-card" id="pv-health-backup">读取中…</div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ⑤ 设置 -->
+  <section class="pv-page" id="pv-page-settings" hidden aria-labelledby="pv-page-settings-title">
+    <div class="pv-page-inner">
+      <header class="pv-page-head">
+        <h2 class="pv-page-title" id="pv-page-settings-title">设置</h2>
+        <p class="pv-page-sub">改完立刻生效的项会标「已生效」，其余需要改 <code>config.toml</code>。</p>
+      </header>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">安全</h3>
+        <dl class="pv-kv" id="pv-settings-security"></dl>
+        <div class="pv-row-actions">
+          <button class="pv-btn pv-btn-sm" id="pv-settings-change-password" type="button">改主密码</button>
+          <button class="pv-btn pv-btn-sm" id="pv-settings-reset-recovery" type="button">重新生成恢复码</button>
+        </div>
+        <p class="pv-hint" id="pv-settings-write-hint"></p>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">整理</h3>
+        <dl class="pv-kv" id="pv-settings-inbox"></dl>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">接入 Agent（MCP）</h3>
+        <p class="pv-hint">
+          配置由服务端生成（`GET /api/mcp-config`），`command` / `args` / `env` 三个键必须整段照抄 ——
+          自己拼参数会让客户端启动失败却只显示「零个工具」。
+        </p>
+        <div class="pv-mcp-block" id="pv-mcp-block">
+          <p class="pv-hint">正在读取配置…</p>
+        </div>
+      </section>
+
+      <section class="pv-section">
+        <h3 class="pv-section-title">维护</h3>
+        <dl class="pv-kv" id="pv-settings-paths"></dl>
+        <div class="pv-row-actions">
+          <button class="pv-btn pv-btn-sm" id="pv-open-vault-dir" type="button">打开库目录</button>
+          <button class="pv-btn pv-btn-sm" id="pv-open-snapshot-dir" type="button">打开快照目录</button>
+        </div>
+      </section>
+
+      <section class="pv-section pv-danger-zone">
+        <h3 class="pv-section-title pv-danger-title">危险区</h3>
+        <p class="pv-hint">
+          这两个操作会重写头部加密参数。做之前请先确认 <code>snapshots/</code> 里有一份能用的旧文件。
+        </p>
+        <dl class="pv-kv" id="pv-settings-danger"></dl>
+      </section>
+    </div>
+  </section>
+
+  <!-- 底部状态条 26px -->
+  <footer class="pv-statusbar" id="pv-statusbar">
+    <span id="pv-status-inbox">inbox 监听状态未知</span>
+    <span class="pv-foot-spacer"></span>
+    <span id="pv-status-sync" class="pv-meta">已连接</span>
+  </footer>
+</div>
+
+<!-- ============================================================ 弹层 / toast -->
+<div class="pv-modal" id="pv-modal" hidden>
+  <div class="pv-modal-card" role="dialog" aria-modal="true" aria-labelledby="pv-modal-title">
+    <h2 class="pv-modal-title" id="pv-modal-title"></h2>
+    <div class="pv-modal-body" id="pv-modal-body"></div>
+    <footer class="pv-modal-foot" id="pv-modal-foot"></footer>
+  </div>
+</div>
+
+<div class="pv-dropveil" id="pv-dropveil" hidden aria-hidden="true">
+  <p>松手就导入</p>
+</div>
+
+<div class="pv-toasts" id="pv-toasts" role="status" aria-live="polite"></div>
+
+<noscript>
+  <p class="pv-noscript">这个界面需要 JavaScript。脚本被拦掉了的话，用 <code>pv list</code> 命令行也能用。</p>
+</noscript>
+
+</body>
+</html>
