@@ -39,6 +39,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 import traceback
 import urllib.parse
 import webbrowser
@@ -47,10 +48,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .. import runtime
+from .. import dpapi, runtime
 from ..config import Settings, load_settings, log_event
 from ..errors import Refused, VaultError
+from ..models import score_secret
 from ..redact import public_error
+from ..vault import Vault
 from .events import CLOSE_EVENT, KEEPALIVE_BYTES, encode_chunk, encode_sse
 from .session import AppState
 
@@ -67,6 +70,9 @@ PORT_ATTEMPTS = 20
 
 COOKIE_NAME = "pv_session"
 TOKEN_HEADER = "X-PV-Token"
+
+#: 主密码强度门槛（bit）。与 CLI 的 `--force` 同源：低于它必须先让用户显式确认。
+MIN_PASSWORD_ENTROPY = 55.0
 
 #: 请求体上限（当前接口只收 JSON 小体；上传走 multipart 的 T09 另行放宽）。
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -368,6 +374,33 @@ def handle_session(req: Request) -> Response:
     )
 
 
+def weak_password_response(password: str, *, hint: str = "") -> Response | None:
+    """强度不足 → 422 响应（带 `entropy` / `level`）；够强 → `None`。
+
+    为什么不抛 `HttpError`：`HttpError` 的响应体只有 `code` / `message` / `hint`
+    三个键（见 `Response.error` 的构造），而前端要拿 `entropy` / `level` 去画强度条
+    和提示文案。给传输层的异常类加业务字段会让它变成第二个业务结构，不如让 handler
+    直接返回一个已经成形的 `Response`（状态码与 `code` 与抛异常完全一致）。
+    """
+    entropy, level = score_secret(password)
+    if entropy >= MIN_PASSWORD_ENTROPY:
+        return None
+    return Response.json(
+        {
+            "code": "weak_password",
+            "message": (
+                f"主密码估算强度只有 {entropy} bit（{level}）："
+                "库文件可能被放到网盘上，那时攻击者可以离线无限次爆破。"
+            ),
+            "hint": hint
+            or "建议 5 个以上随机单词，或至少 12 位混合字符；确认仍要使用请带 force=true。",
+            "entropy": entropy,
+            "level": level,
+        },
+        status=422,
+    )
+
+
 def handle_unlock(req: Request) -> Response:
     """`POST /api/unlock` → 解锁。三选一：password / recovery_code / use_dpapi。"""
     data = req.json_body()
@@ -390,6 +423,66 @@ def handle_unlock(req: Request) -> Response:
         use_dpapi=use_dpapi,
     )
     return Response.json(req.state.session_payload(), set_cookie=req.server.cookie_header())
+
+
+def handle_setup(req: Request) -> Response:
+    """`POST /api/setup` → 建库（CLI `pv init` 的等价物）。
+
+    为什么在本文件而不是 `web/api.py`：那边所有路由都被 `_guard_locked()` 包住，
+    而建库时**库还不存在**、会话必然是「未解锁」，会被一律挡成 401 + `locked`。
+    这是唯一一个「先有库才有会话」的鸡生蛋接口，所以放在会话级这一层。
+
+    恢复码只在这一次响应里出现：不落盘（`Vault.create` 只存它的包裹结果）、
+    不进日志（下面 `log_event` 刻意不带它）。
+    """
+    data = req.json_body()
+    password = data.get("password")
+    confirm = data.get("confirm")
+    label = data.get("label") or ""
+    local_unlock = bool(data.get("local_unlock", True))
+    force = bool(data.get("force"))
+
+    settings = req.state.settings
+    if settings.vault_path.exists():
+        raise HttpError(409, "already_exists", "密码库已经存在，不需要再建。")
+    if not isinstance(password, str) or not password:
+        raise HttpError(400, "missing_password", "主密码不能为空。")
+    if password != confirm:
+        raise HttpError(400, "password_mismatch", "两次输入不一致。")
+    if not force:
+        rejection = weak_password_response(
+            password, hint="建议 5 个以上随机单词；确认仍要使用请勾选「我知道风险」。"
+        )
+        if rejection is not None:
+            return rejection
+    if local_unlock and not dpapi.is_supported():
+        raise HttpError(
+            400,
+            "dpapi_unavailable",
+            "本机免密只在 Windows 上可用（依赖系统级 DPAPI）。请先关掉它再建库。",
+        )
+
+    started = time.monotonic()
+    vault, recovery = Vault.create(settings, password, enable_dpapi=local_unlock, label=str(label))
+    # 复用现有解锁路径：它会起 inbox 监听并广播 session 事件（内部再跑一次 KDF，
+    # 几秒，换来「建库后立刻是解锁态」这一条路径的唯一性，值）。
+    req.state.unlock(password=password)
+    log_event(
+        "setup",
+        scope="pv web",
+        local_unlock=vault.has_method("dpapi"),
+        ms=int((time.monotonic() - started) * 1000),
+    )
+    return Response.json(
+        {
+            "ok": True,
+            "recovery_code": recovery,
+            "local_unlock": vault.has_method("dpapi"),
+            "vault": str(vault.path),
+            "session": req.state.session_payload(),
+        },
+        set_cookie=req.server.cookie_header(),
+    )
 
 
 def handle_lock(req: Request) -> Response:
@@ -740,6 +833,9 @@ class WebServer:
         self.router.add("GET", "/", handle_index)
         self.router.add("GET", "/api/session", handle_session)
         self.router.add("POST", "/api/unlock", handle_unlock)
+        # 建库必须在业务层之外：`api.py` 的路由全被 `_guard_locked()` 包住，而建库时
+        # 库还不存在、必然「未解锁」，会被挡成 401 + locked（详见 handle_setup）。
+        self.router.add("POST", "/api/setup", handle_setup)
         self.router.add("POST", "/api/lock", handle_lock)
         self.router.add("GET", "/api/events", self.stream_events, sse=True)
 
@@ -1193,6 +1289,7 @@ __all__ = [
     "COOKIE_NAME",
     "DEFAULT_PORT",
     "HttpError",
+    "MIN_PASSWORD_ENTROPY",
     "PORT_ATTEMPTS",
     "Request",
     "Response",
@@ -1201,8 +1298,10 @@ __all__ = [
     "TOKEN_HEADER",
     "WebServer",
     "cookie_value",
+    "handle_setup",
     "main",
     "serve",
+    "weak_password_response",
 ]
 
 

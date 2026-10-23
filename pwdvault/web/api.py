@@ -1,4 +1,5 @@
-"""Web 业务 API（T09）：记录 CRUD / 暂存区 / inbox 上传 / 体检 / MCP 接入配置。
+"""Web 业务 API（T09）：记录 CRUD / 暂存区 / inbox 上传 / 体检 / MCP 接入配置 /
+库级维护（改主密码 / 重置恢复码 / 本机免密 / 导出明文）。
 
 这一层只做三件事：**解析请求 → 调业务层 → 把结果脱敏后序列化**。
 它自己不碰文件、不碰加密原语、不碰状态机规则（规则全在 `locks.py` / `staging.py` /
@@ -29,10 +30,11 @@ import os
 import sys
 import time
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import audit, service
+from .. import audit, dpapi, importers, service
 from ..config import log_event
 from ..errors import InvalidRecord, VaultError
 from ..inbox import INBOX_SUFFIXES
@@ -40,8 +42,14 @@ from ..locks import Operation
 from ..models import Record, split_tags
 from ..redact import redact_record
 from ..staging import can_transition, label_of
-from ..vault import atomic_write
-from .server import HttpError, Request, Response, WebServer
+from ..vault import Vault, atomic_write
+from .server import (
+    HttpError,
+    Request,
+    Response,
+    WebServer,
+    weak_password_response,
+)
 
 #: 列表默认/最大条数。前端有搜索框，200 条足够一屏滚动；500 是保护上限。
 DEFAULT_LIST_LIMIT = 200
@@ -1300,6 +1308,168 @@ def handle_mcp_config(req: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------- 库级维护
+#: `Vault.unlocked_by` 的取值（见 `vault.py`）：只有 `password` 才是「用户这次真的
+#: 输过主密码进来的」，其余（`recovery` / `dpapi` / `dek`）手上都没有旧密码可验证。
+UNLOCKED_BY_PASSWORD = "password"
+
+
+def handle_vault_password(req: Request) -> Response:
+    """`POST /api/vault/password` → 改主密码（只重包 DEK，正文不重新加密）。
+
+    `current` 的必要性由**这次是怎么进来的**决定：用恢复码或本机免密进来的用户
+    压根没有旧主密码，强要他填等于把人锁在门外；反过来，用主密码进来的必须再验一次，
+    否则「路过电脑的人」改掉主密码就能把主人挡在外面（恢复码还在，但这已经是不可逆
+    的破坏）。
+    """
+    data = req.json_body()
+    current = data.get("current")
+    new = data.get("new")
+    confirm = data.get("confirm")
+    force = bool(data.get("force"))
+
+    if new != confirm:
+        raise HttpError(400, "password_mismatch", "两次输入不一致。")
+    if not isinstance(new, str) or not new:
+        raise HttpError(400, "missing_new_password", "新主密码不能为空。")
+    if not force:
+        rejection = weak_password_response(
+            str(new), hint="建议 5 个以上随机单词；确认仍要使用请勾选「我知道风险」。"
+        )
+        if rejection is not None:
+            return rejection
+
+    store = _store(req)
+    vault = req.state.vault
+    if str(getattr(vault, "unlocked_by", "") or "") == UNLOCKED_BY_PASSWORD:
+        if not isinstance(current, str) or not current:
+            raise HttpError(400, "missing_current_password", "请先输入当前主密码。")
+        try:
+            Vault.open(req.state.settings, password=current)
+        except VaultError as exc:
+            raise HttpError(403, "bad_current_password", "当前主密码不正确。") from exc
+
+    def _rewrap(fresh: Vault) -> bool:
+        fresh.rewrap_password(str(new))
+        return True
+
+    store.mutate(_rewrap, purpose="passwd")
+    return Response.json({"ok": True, "records": len(store.vault.records)})
+
+
+def handle_vault_recovery(req: Request) -> Response:
+    """`POST /api/vault/recovery` → 重置恢复码（旧码立刻失效）。
+
+    新码和建库时一样只在响应里出现一次：盘上只留它的包裹结果，没有别的地方能取回。
+    """
+    data = req.json_body()
+    if data.get("confirm") is not True:
+        raise HttpError(
+            400,
+            "need_confirm",
+            "重置会让当前恢复码立刻失效，请带 confirm=true 确认。",
+        )
+
+    store = _store(req)
+    box: dict = {}
+
+    def _reset(fresh: Vault) -> bool:
+        box["code"] = fresh.reset_recovery()
+        return True
+
+    store.mutate(_reset, purpose="recovery")
+    return Response.json(
+        {
+            "ok": True,
+            "recovery_code": str(box.get("code") or ""),
+            "old_invalidated": True,
+            "hint": "旧恢复码已立刻失效，这个新码只显示这一次，关掉就看不到了；"
+            "请马上抄到密码库文件之外的地方（不要放进同一个网盘目录）。",
+        }
+    )
+
+
+def handle_vault_local_unlock(req: Request) -> Response:
+    """`POST /api/vault/local-unlock` → 本机免密开关（Windows DPAPI）。"""
+    data = req.json_body()
+    enabled = data.get("enabled")
+    if enabled is None:
+        raise HttpError(400, "missing_enabled", "请明确 enabled：true 开启，false 关闭。")
+    enabled = bool(enabled)
+    if enabled and not dpapi.is_supported():
+        raise HttpError(
+            400,
+            "dpapi_unavailable",
+            "本机免密只在 Windows 上可用（依赖系统级 DPAPI）。",
+        )
+
+    store = _store(req)
+
+    def _apply(fresh: Vault) -> bool:
+        if enabled:
+            fresh.enable_local_unlock()
+        else:
+            fresh.disable_local_unlock()
+        return True
+
+    store.mutate(_apply, purpose="local_unlock")
+    return Response.json(
+        {
+            "ok": True,
+            "enabled": store.vault.has_method("dpapi"),
+            "machine": dpapi.machine_fingerprint(),
+        }
+    )
+
+
+def handle_export(req: Request) -> Response:
+    """`GET /api/export?format=json|csv&q=&confirm=1` → 导出**明文**。
+
+    这是全产品唯一一个「一次性把保护全部撤掉」的动作，所以必须 `confirm=1`，
+    且**先审计再输出**（照 `cli.py::cmd_export` 的顺序与理由：审计的枚举写错要在
+    明文吐出去之前就炸，而不是先泄了密再发现审计没配上）。
+    """
+    if req.query_str("confirm") != "1":
+        raise HttpError(
+            400,
+            "need_confirm",
+            "导出的是明文，等于把保护全部撤掉。确认请带 confirm=1，并确保目标位置安全。",
+        )
+    fmt = (req.query_str("format", "json") or "json").strip().lower()
+    if fmt not in ("json", "csv"):
+        raise HttpError(400, "bad_format", "format 只支持 json 或 csv。")
+
+    store = _store(req)
+    vault = store.vault
+    query = req.query_str("q", "")
+    records = service.search(vault, query) if query else vault.records
+
+    if fmt == "csv":
+        text = importers.records_to_csv(records)
+        content_type = "text/csv; charset=utf-8"
+    else:
+        text = importers.records_to_json(records)
+        content_type = "application/json; charset=utf-8"
+
+    # 审计行里只有格式与条数，没有任何值（白名单键保证，见 audit.py 模块 docstring）。
+    audit.append(
+        req.state.settings,
+        action="export",
+        actor="web",
+        field_name=fmt,
+        count=len(records),
+    )
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Response.text(
+        text,
+        content_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="pwdvault-export-{stamp}.{fmt}"'
+        },
+    )
+
+
 # ---------------------------------------------------------------- 注册
 def _guard_locked(handler: Callable[[Request], Response]) -> Callable[[Request], Response]:
     """唯一的 `Locked` → 401 翻译点（其它 `VaultError` 交给 dispatcher 按表翻译）。"""
@@ -1343,6 +1513,10 @@ ROUTES: tuple[tuple[str, str, Callable[[Request], Response]], ...] = (
     ("POST", "/api/inbox/upload", handle_inbox_upload),
     ("GET", "/api/health", handle_health),
     ("GET", "/api/mcp-config", handle_mcp_config),
+    ("POST", "/api/vault/password", handle_vault_password),
+    ("POST", "/api/vault/recovery", handle_vault_recovery),
+    ("POST", "/api/vault/local-unlock", handle_vault_local_unlock),
+    ("GET", "/api/export", handle_export),
 )
 
 
@@ -1394,6 +1568,7 @@ __all__ = [
     "MCP_SUBCOMMAND",
     "REVEAL_WARNING",
     "ROUTES",
+    "handle_export",
     "handle_health",
     "handle_inbox_upload",
     "handle_mcp_config",
@@ -1411,6 +1586,9 @@ __all__ = [
     "handle_staging_list",
     "handle_staging_rollback",
     "handle_tags",
+    "handle_vault_local_unlock",
+    "handle_vault_password",
+    "handle_vault_recovery",
     "register_api_routes",
     "safe_filename",
 ]
